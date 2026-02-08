@@ -1,0 +1,9 @@
+# Study notes (private)
+docs/
+
+# Python
+__pycache__/
+*.pyc
+
+# Docker
+.docker/

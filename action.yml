@@ -1,0 +1,26 @@
+name: 'Agentic AppSec Pipeline'
+description: 'AI-driven application security analysis for pull requests'
+
+inputs:
+  github_token:
+    description: 'GitHub token for API access'
+    required: true
+  mode:
+    description: 'shadow (observe only, never blocks) or enforce (can block the PR)'
+    required: false
+    default: 'shadow'
+
+outputs:
+  decision:
+    description: 'Security verdict: allowed, manual_review, or blocked'
+  continue_pipeline:
+    description: 'true if the pipeline should continue, false if blocked'
+  reason:
+    description: 'Human-readable explanation of the decision'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+    INPUT_MODE: ${{ inputs.mode }}
