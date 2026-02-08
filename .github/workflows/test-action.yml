@@ -1,0 +1,38 @@
+name: Test Action
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test-shadow:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Agentic AppSec (shadow mode)
+        id: appsec
+        uses: ./
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          mode: shadow
+
+      - name: Verify outputs
+        run: |
+          echo "Decision: ${{ steps.appsec.outputs.decision }}"
+          echo "Continue: ${{ steps.appsec.outputs.continue_pipeline }}"
+          echo "Reason: ${{ steps.appsec.outputs.reason }}"
+
+          # Verify expected values
+          if [ "${{ steps.appsec.outputs.decision }}" != "allowed" ]; then
+            echo "FAIL: expected decision=allowed"
+            exit 1
+          fi
+          if [ "${{ steps.appsec.outputs.continue_pipeline }}" != "true" ]; then
+            echo "FAIL: expected continue_pipeline=true"
+            exit 1
+          fi
+          echo "All checks passed"
