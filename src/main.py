@@ -1,47 +1,16 @@
-"""
-Agentic AppSec Pipeline - Entry Point
-
-Reads GitHub Actions environment, makes a security decision, writes outputs.
-
-Step 1: deterministic logic only.
-- shadow mode  → decision=allowed,       continue_pipeline=true
-- enforce mode → decision=manual_review,  continue_pipeline=false
-"""
+"""Agentic AppSec Pipeline — entry point."""
 
 import os
 import sys
 
-
-def get_mode() -> str:
-    """Read the operating mode from GitHub Actions input."""
-    mode = os.environ.get("INPUT_MODE", "shadow")
-    if mode not in ("shadow", "enforce"):
-        print(f"::warning::Unknown mode '{mode}', defaulting to 'shadow'")
-        mode = "shadow"
-    return mode
+from src.github_context import GitHubContext
+from src.decision_engine import DecisionEngine
 
 
-def decide(mode: str) -> dict:
-    """Make a security decision based on the mode."""
-    if mode == "shadow":
-        return {
-            "decision": "allowed",
-            "continue_pipeline": "true",
-            "reason": "Shadow mode: observing only, pipeline continues.",
-        }
-    else:  # enforce
-        return {
-            "decision": "manual_review",
-            "continue_pipeline": "false",
-            "reason": "Enforce mode: no security tools configured yet, requiring manual review.",
-        }
-
-
-def write_outputs(outputs: dict) -> None:
-    """Write key=value pairs to GITHUB_OUTPUT so subsequent steps can read them."""
+def write_outputs(outputs: dict[str, str]) -> None:
+    """Write key=value pairs to GITHUB_OUTPUT."""
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:
-        # Running locally, just print
         print("--- Outputs (no GITHUB_OUTPUT file) ---")
         for key, value in outputs.items():
             print(f"  {key}={value}")
@@ -56,19 +25,18 @@ def write_outputs(outputs: dict) -> None:
 def main() -> int:
     print("=== Agentic AppSec Pipeline ===")
 
-    mode = get_mode()
-    print(f"Mode: {mode}")
+    ctx = GitHubContext.from_environment()
+    print(f"Mode: {ctx.mode}")
 
-    outputs = decide(mode)
-    print(f"Decision: {outputs['decision']}")
-    print(f"Reason: {outputs['reason']}")
+    engine = DecisionEngine()
+    decision = engine.decide(ctx)
+    print(f"Decision: {decision.verdict.value}")
+    print(f"Reason: {decision.reason}")
 
-    write_outputs(outputs)
+    write_outputs(decision.to_outputs())
 
-    # In shadow mode, always exit 0 (don't block the pipeline)
-    # In enforce mode, exit 1 if we're blocking
-    if mode == "enforce" and outputs["continue_pipeline"] == "false":
-        print("::warning::Pipeline blocked by Agentic AppSec (enforce mode)")
+    if not decision.continue_pipeline:
+        print("::warning::Pipeline blocked by Agentic AppSec")
         return 1
     return 0
 

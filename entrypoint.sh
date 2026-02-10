@@ -6,4 +6,5 @@ if command -v git &> /dev/null && [ -n "${GITHUB_WORKSPACE:-}" ]; then
     git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 fi
 
-exec python /app/src/main.py
+cd /app
+exec python -m src.main
