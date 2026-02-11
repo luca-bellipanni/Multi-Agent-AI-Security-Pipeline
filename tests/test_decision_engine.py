@@ -1,5 +1,7 @@
 """Tests for the decision engine."""
 
+from unittest.mock import patch
+
 from src.models import Verdict, Severity
 from src.github_context import GitHubContext
 from src.decision_engine import DecisionEngine
@@ -23,6 +25,7 @@ def _make_context(**overrides) -> GitHubContext:
 
 
 class TestShadowMode:
+    """Without API key, shadow mode always allows (deterministic fallback)."""
 
     def test_verdict_is_allowed(self):
         decision = DecisionEngine().decide(_make_context(mode="shadow"))
@@ -32,16 +35,13 @@ class TestShadowMode:
         decision = DecisionEngine().decide(_make_context(mode="shadow"))
         assert decision.continue_pipeline is True
 
-    def test_no_tools_selected(self):
-        decision = DecisionEngine().decide(_make_context(mode="shadow"))
-        assert decision.selected_tools == []
-
     def test_severity_is_none(self):
         decision = DecisionEngine().decide(_make_context(mode="shadow"))
         assert decision.max_severity == Severity.NONE
 
 
 class TestEnforceMode:
+    """Without API key, enforce mode requires manual review (deterministic fallback)."""
 
     def test_verdict_is_manual_review(self):
         decision = DecisionEngine().decide(_make_context(mode="enforce"))
@@ -50,6 +50,73 @@ class TestEnforceMode:
     def test_pipeline_blocked(self):
         decision = DecisionEngine().decide(_make_context(mode="enforce"))
         assert decision.continue_pipeline is False
+
+
+class TestFallbackNoApiKey:
+    """Without INPUT_AI_API_KEY, the engine skips AI and uses deterministic rules."""
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_shadow_works_without_api_key(self):
+        decision = DecisionEngine().decide(_make_context(mode="shadow"))
+        assert decision.verdict == Verdict.ALLOWED
+        assert "No AI configured" in decision.reason
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_enforce_works_without_api_key(self):
+        decision = DecisionEngine().decide(_make_context(mode="enforce"))
+        assert decision.verdict == Verdict.MANUAL_REVIEW
+        assert "No AI configured" in decision.reason
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_no_tools_recommended_without_ai(self):
+        decision = DecisionEngine().decide(_make_context(mode="shadow"))
+        assert decision.selected_tools == []
+
+
+class TestFallbackAiError:
+    """When AI is configured but fails, the engine falls back gracefully."""
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.create_triage_agent", side_effect=RuntimeError("API down"))
+    def test_shadow_fallback_on_ai_error(self, mock_agent):
+        decision = DecisionEngine().decide(_make_context(mode="shadow"))
+        assert decision.verdict == Verdict.ALLOWED
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.create_triage_agent", side_effect=RuntimeError("API down"))
+    def test_enforce_fallback_on_ai_error(self, mock_agent):
+        decision = DecisionEngine().decide(_make_context(mode="enforce"))
+        assert decision.verdict == Verdict.MANUAL_REVIEW
+
+
+class TestTriageIntegration:
+    """When AI triage returns results, they are included in the Decision."""
+
+    def test_triage_tools_in_decision(self):
+        engine = DecisionEngine()
+        triage = {"recommended_tools": ["semgrep", "gitleaks"], "reason": "Python PR"}
+        decision = engine._apply_gate(_make_context(mode="shadow"), triage)
+        assert decision.selected_tools == ["semgrep", "gitleaks"]
+
+    def test_triage_reason_in_decision(self):
+        engine = DecisionEngine()
+        triage = {"recommended_tools": [], "reason": "Docs only, skip scanning"}
+        decision = engine._apply_gate(_make_context(mode="shadow"), triage)
+        assert "Docs only" in decision.reason
+
+    def test_gate_overrides_ai_in_shadow(self):
+        """Shadow mode is ALWAYS allowed, regardless of what AI says."""
+        engine = DecisionEngine()
+        triage = {"recommended_tools": ["semgrep"], "reason": "Suspicious code"}
+        decision = engine._apply_gate(_make_context(mode="shadow"), triage)
+        assert decision.verdict == Verdict.ALLOWED
+
+    def test_gate_overrides_ai_in_enforce(self):
+        """Enforce mode is ALWAYS manual_review when no tool results exist."""
+        engine = DecisionEngine()
+        triage = {"recommended_tools": [], "reason": "Looks safe"}
+        decision = engine._apply_gate(_make_context(mode="enforce"), triage)
+        assert decision.verdict == Verdict.MANUAL_REVIEW
 
 
 class TestOutputFormat:

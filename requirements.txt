@@ -1,2 +1,1 @@
-# No runtime dependencies yet (Step 2).
-# Step 3 will add: smolagents[litellm]
+smolagents[litellm]>=1.0

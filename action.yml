@@ -9,6 +9,14 @@ inputs:
     description: 'shadow (observe only, never blocks) or enforce (can block the PR)'
     required: false
     default: 'shadow'
+  ai_api_key:
+    description: 'API key for AI provider (OpenAI, Anthropic, etc). Optional — without it, uses deterministic fallback.'
+    required: false
+    default: ''
+  ai_model:
+    description: 'LLM model ID for LiteLLM (e.g. gpt-4o-mini, anthropic/claude-sonnet-4-5-20250929)'
+    required: false
+    default: 'gpt-4o-mini'
 
 outputs:
   decision:
@@ -24,3 +32,5 @@ runs:
   env:
     INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
     INPUT_MODE: ${{ inputs.mode }}
+    INPUT_AI_API_KEY: ${{ inputs.ai_api_key }}
+    INPUT_AI_MODEL: ${{ inputs.ai_model }}
