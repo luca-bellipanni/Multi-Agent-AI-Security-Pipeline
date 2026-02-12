@@ -32,9 +32,21 @@ class DecisionEngine:
 
         try:
             from src.agent import create_triage_agent, run_triage
+            from src.tools import FetchPRFilesTool
 
             print(f"Running AI triage (model: {model_id})...")
-            agent = create_triage_agent(api_key, model_id)
+
+            # Build tools list — only create PR tool when we have full context
+            tools = []
+            if ctx.token and ctx.repository and ctx.pr_number:
+                tools.append(
+                    FetchPRFilesTool(
+                        github_token=ctx.token,
+                        repository=ctx.repository,
+                    )
+                )
+
+            agent = create_triage_agent(api_key, model_id, tools=tools)
             result = run_triage(agent, ctx)
             print(f"AI triage complete: {result['reason']}")
             return result

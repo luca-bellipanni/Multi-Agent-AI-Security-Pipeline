@@ -138,3 +138,54 @@ class TestOutputFormat:
         decision = DecisionEngine().decide(_make_context(mode="enforce"))
         parsed = json.loads(decision.to_json())
         assert parsed["verdict"] == "manual_review"
+
+
+class TestToolInjection:
+    """Verify that DecisionEngine creates and passes the PR files tool."""
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.run_triage", return_value={
+        "recommended_tools": ["semgrep", "gitleaks"],
+        "reason": "Python files changed",
+    })
+    @patch("src.agent.create_triage_agent")
+    def test_tool_created_for_pr_with_token(self, mock_create, mock_run):
+        """When ctx has token, repository, and pr_number, a tool is passed."""
+        ctx = _make_context(token="ghp_test", repository="owner/repo", pr_number=42)
+        DecisionEngine().decide(ctx)
+
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args
+        tools = call_kwargs.kwargs.get("tools", [])
+        assert len(tools) == 1
+        assert tools[0].name == "fetch_pr_files"
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.run_triage", return_value={
+        "recommended_tools": ["gitleaks"],
+        "reason": "Push event",
+    })
+    @patch("src.agent.create_triage_agent")
+    def test_no_tool_without_pr_number(self, mock_create, mock_run):
+        """When pr_number is None, no tool is created."""
+        ctx = _make_context(token="ghp_test", pr_number=None)
+        DecisionEngine().decide(ctx)
+
+        call_kwargs = mock_create.call_args
+        tools = call_kwargs.kwargs.get("tools", [])
+        assert tools == []
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.run_triage", return_value={
+        "recommended_tools": [],
+        "reason": "No token",
+    })
+    @patch("src.agent.create_triage_agent")
+    def test_no_tool_without_token(self, mock_create, mock_run):
+        """When github token is empty, no tool is created."""
+        ctx = _make_context(token="", pr_number=42)
+        DecisionEngine().decide(ctx)
+
+        call_kwargs = mock_create.call_args
+        tools = call_kwargs.kwargs.get("tools", [])
+        assert tools == []

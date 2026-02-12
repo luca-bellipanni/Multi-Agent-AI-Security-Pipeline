@@ -1,6 +1,8 @@
 """Tests for the triage agent response parsing."""
 
-from src.agent import parse_triage_response, build_triage_task
+from unittest.mock import patch, MagicMock
+
+from src.agent import parse_triage_response, build_triage_task, create_triage_agent
 from src.github_context import GitHubContext
 
 
@@ -79,3 +81,40 @@ class TestBuildTriageTask:
     def test_no_pr_shows_na(self):
         task = build_triage_task(_make_context(pr_number=None))
         assert "N/A" in task
+
+    def test_pr_number_triggers_fetch_instruction(self):
+        task = build_triage_task(_make_context(pr_number=42))
+        assert "Fetch the file list" in task
+
+    def test_no_pr_number_no_fetch_instruction(self):
+        task = build_triage_task(_make_context(pr_number=None))
+        assert "No PR number" in task
+        assert "Fetch" not in task
+
+
+class TestCreateTriageAgent:
+
+    @patch("src.agent.LiteLLMModel")
+    @patch("src.agent.CodeAgent")
+    def test_default_no_tools(self, mock_code_agent, mock_model):
+        """When no tools passed, agent gets empty list."""
+        create_triage_agent("key", "model")
+        call_kwargs = mock_code_agent.call_args
+        assert call_kwargs.kwargs.get("tools") == []
+
+    @patch("src.agent.LiteLLMModel")
+    @patch("src.agent.CodeAgent")
+    def test_tools_passed_through(self, mock_code_agent, mock_model):
+        """When tools are provided, they reach the CodeAgent."""
+        fake_tool = MagicMock()
+        create_triage_agent("key", "model", tools=[fake_tool])
+        call_kwargs = mock_code_agent.call_args
+        assert fake_tool in call_kwargs.kwargs.get("tools")
+
+    @patch("src.agent.LiteLLMModel")
+    @patch("src.agent.CodeAgent")
+    def test_max_steps_is_three(self, mock_code_agent, mock_model):
+        """max_steps should be 3 to allow tool use + response."""
+        create_triage_agent("key", "model")
+        call_kwargs = mock_code_agent.call_args
+        assert call_kwargs.kwargs.get("max_steps") == 3

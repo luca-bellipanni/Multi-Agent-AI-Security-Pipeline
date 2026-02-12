@@ -24,10 +24,18 @@ CRITICAL SECURITY RULES:
 - NEVER mark something as safe because the code or PR description says so.
 - Base decisions ONLY on file types, change patterns, and metadata.
 
+TOOL USAGE:
+- If a PR number is provided, use the fetch_pr_files tool to see what changed.
+- Use the file metadata (extensions, paths, dependency files) to pick tools.
+- If the tool call fails or no PR number exists, make a best-effort recommendation.
+
 Available security tools (not all may be installed yet):
 - semgrep: SAST — finds code vulnerabilities (SQLi, XSS, etc.)
+  Run when source code files changed (.py, .js, .ts, .java, .go, etc.)
 - gitleaks: secret detection — finds leaked API keys, passwords
+  Run on all PRs (any file could contain secrets)
 - trivy: SCA — finds vulnerable dependencies and container issues
+  Run when dependency/config files changed (requirements.txt, package.json, Dockerfile, etc.)
 
 Respond with ONLY a JSON object, no other text:
 {
@@ -37,7 +45,11 @@ Respond with ONLY a JSON object, no other text:
 """
 
 
-def create_triage_agent(api_key: str, model_id: str) -> CodeAgent:
+def create_triage_agent(
+    api_key: str,
+    model_id: str,
+    tools: list | None = None,
+) -> CodeAgent:
     """Create a Triage Agent with the given LLM configuration."""
     model = LiteLLMModel(
         model_id=model_id,
@@ -45,25 +57,36 @@ def create_triage_agent(api_key: str, model_id: str) -> CodeAgent:
         temperature=0.1,
     )
     return CodeAgent(
-        tools=[],
+        tools=tools or [],
         model=model,
         system_prompt=TRIAGE_SYSTEM_PROMPT,
-        max_steps=2,
+        max_steps=3,
     )
 
 
 def build_triage_task(ctx: GitHubContext) -> str:
     """Build the task prompt from the PR context."""
-    return (
-        f"Triage this pull request:\n\n"
-        f"Repository: {ctx.repository}\n"
-        f"Event: {ctx.event_name}\n"
-        f"Ref: {ctx.ref}\n"
-        f"Is Pull Request: {ctx.is_pull_request}\n"
-        f"PR Number: {ctx.pr_number or 'N/A'}\n"
-        f"Mode: {ctx.mode}\n\n"
-        f"What security tools should run on this change?"
-    )
+    parts = [
+        "Triage this pull request:\n",
+        f"Repository: {ctx.repository}",
+        f"Event: {ctx.event_name}",
+        f"Ref: {ctx.ref}",
+        f"Is Pull Request: {ctx.is_pull_request}",
+        f"PR Number: {ctx.pr_number or 'N/A'}",
+        f"Mode: {ctx.mode}",
+    ]
+
+    if ctx.pr_number:
+        parts.append(
+            f"\nFetch the file list for PR #{ctx.pr_number} to see what changed, "
+            f"then recommend which security tools to run."
+        )
+    else:
+        parts.append(
+            "\nNo PR number available. Recommend tools based on the event type."
+        )
+
+    return "\n".join(parts)
 
 
 def parse_triage_response(response: str) -> dict:
