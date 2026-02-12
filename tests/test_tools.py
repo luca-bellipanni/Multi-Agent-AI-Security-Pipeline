@@ -1,12 +1,21 @@
-"""Tests for the GitHub API tools."""
+"""Tests for the GitHub API tools and Semgrep tool."""
 
+import json
+import subprocess
 from unittest.mock import patch, MagicMock
 
+from src.models import Finding, Severity
 from src.tools import (
     FetchPRFilesTool,
+    SemgrepTool,
     _get_language,
     _format_pr_files,
+    _validate_rulesets,
+    _format_semgrep_findings,
+    parse_semgrep_findings,
     DEPENDENCY_FILES,
+    ALLOWED_RULESET_PREFIXES,
+    MAX_RULESETS,
 )
 
 
@@ -26,6 +35,24 @@ def _make_gh_file(filename, status="modified", additions=10, deletions=2):
         "deletions": deletions,
         "changes": additions + deletions,
     }
+
+
+def _make_semgrep_json(findings=None):
+    """Create a mock Semgrep JSON output string."""
+    results = []
+    for f in (findings or []):
+        results.append({
+            "check_id": f.get("rule_id", "test.rule"),
+            "path": f.get("path", "test.py"),
+            "start": {"line": f.get("line", 1), "col": 1, "offset": 0},
+            "end": {"line": f.get("line", 1), "col": 10, "offset": 10},
+            "extra": {
+                "severity": f.get("severity", "WARNING"),
+                "message": f.get("message", "Test message"),
+                "metadata": {},
+            },
+        })
+    return json.dumps({"results": results, "errors": []})
 
 
 # --- Unit tests: _get_language ---
@@ -240,3 +267,403 @@ class TestFetchPRFilesTool:
         for call in mock_get.call_args_list:
             headers = call.kwargs.get("headers", {})
             assert headers.get("Authorization") == "token my-secret-token"
+
+
+# --- Semgrep: ruleset validation ---
+
+class TestValidateRulesets:
+
+    def test_valid_p_prefix(self):
+        rulesets, error = _validate_rulesets("p/python")
+        assert rulesets == ["p/python"]
+        assert error is None
+
+    def test_valid_r_prefix(self):
+        rulesets, error = _validate_rulesets("r/python.lang.security")
+        assert rulesets == ["r/python.lang.security"]
+        assert error is None
+
+    def test_valid_s_prefix(self):
+        rulesets, error = _validate_rulesets("s/some-ruleset")
+        assert rulesets == ["s/some-ruleset"]
+        assert error is None
+
+    def test_multiple_valid(self):
+        rulesets, error = _validate_rulesets("p/python,p/owasp-top-ten")
+        assert rulesets == ["p/python", "p/owasp-top-ten"]
+        assert error is None
+
+    def test_empty_config_error(self):
+        rulesets, error = _validate_rulesets("")
+        assert rulesets == []
+        assert "No rulesets" in error
+
+    def test_too_many_rulesets(self):
+        config = ",".join(f"p/rule{i}" for i in range(MAX_RULESETS + 1))
+        rulesets, error = _validate_rulesets(config)
+        assert rulesets == []
+        assert "Too many" in error
+
+    def test_path_traversal_blocked(self):
+        rulesets, error = _validate_rulesets("/etc/passwd")
+        assert rulesets == []
+        assert "not allowed" in error
+
+    def test_relative_path_blocked(self):
+        rulesets, error = _validate_rulesets("../../etc/shadow")
+        assert rulesets == []
+        assert "not allowed" in error
+
+    def test_flag_injection_blocked(self):
+        rulesets, error = _validate_rulesets("--include /etc")
+        assert rulesets == []
+        assert "not allowed" in error
+
+    def test_whitespace_trimmed(self):
+        rulesets, error = _validate_rulesets("  p/python , p/java  ")
+        assert rulesets == ["p/python", "p/java"]
+        assert error is None
+
+
+# --- Semgrep: parse findings ---
+
+class TestParseSemgrepFindings:
+
+    def test_empty_results(self):
+        raw = json.dumps({"results": [], "errors": []})
+        assert parse_semgrep_findings(raw) == []
+
+    def test_single_finding(self):
+        raw = _make_semgrep_json([{
+            "rule_id": "python.exec",
+            "path": "app.py",
+            "line": 42,
+            "severity": "ERROR",
+            "message": "Use of exec()",
+        }])
+        findings = parse_semgrep_findings(raw)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.tool == "semgrep"
+        assert f.rule_id == "python.exec"
+        assert f.path == "app.py"
+        assert f.line == 42
+        assert f.severity == Severity.HIGH
+        assert f.message == "Use of exec()"
+
+    def test_severity_error_maps_to_high(self):
+        raw = _make_semgrep_json([{"severity": "ERROR"}])
+        assert parse_semgrep_findings(raw)[0].severity == Severity.HIGH
+
+    def test_severity_warning_maps_to_medium(self):
+        raw = _make_semgrep_json([{"severity": "WARNING"}])
+        assert parse_semgrep_findings(raw)[0].severity == Severity.MEDIUM
+
+    def test_severity_info_maps_to_low(self):
+        raw = _make_semgrep_json([{"severity": "INFO"}])
+        assert parse_semgrep_findings(raw)[0].severity == Severity.LOW
+
+    def test_unknown_severity_defaults_to_low(self):
+        raw = _make_semgrep_json([{"severity": "UNKNOWN"}])
+        assert parse_semgrep_findings(raw)[0].severity == Severity.LOW
+
+    def test_invalid_json_returns_empty(self):
+        assert parse_semgrep_findings("not json") == []
+
+    def test_none_returns_empty(self):
+        assert parse_semgrep_findings(None) == []
+
+    def test_multiple_findings(self):
+        raw = _make_semgrep_json([
+            {"severity": "ERROR", "rule_id": "rule1"},
+            {"severity": "WARNING", "rule_id": "rule2"},
+            {"severity": "INFO", "rule_id": "rule3"},
+        ])
+        findings = parse_semgrep_findings(raw)
+        assert len(findings) == 3
+
+
+# --- Semgrep: format findings ---
+
+class TestFormatSemgrepFindings:
+
+    def test_no_findings(self):
+        raw = json.dumps({"results": [], "errors": []})
+        result = _format_semgrep_findings(raw)
+        assert "No findings" in result
+
+    def test_with_findings(self):
+        raw = _make_semgrep_json([{
+            "rule_id": "python.exec",
+            "path": "app.py",
+            "line": 10,
+            "severity": "ERROR",
+            "message": "exec detected",
+        }])
+        result = _format_semgrep_findings(raw)
+        assert "1 finding" in result
+        assert "[ERROR]" in result
+        assert "python.exec" in result
+        assert "app.py:10" in result
+
+    def test_invalid_json(self):
+        result = _format_semgrep_findings("broken")
+        assert "Error" in result
+
+
+# --- Semgrep: SemgrepTool ---
+
+class TestSemgrepTool:
+
+    def test_tool_attributes(self):
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        assert tool.name == "run_semgrep"
+        assert tool.output_type == "string"
+        assert "config" in tool.inputs
+
+    def test_workspace_not_in_inputs(self):
+        """workspace_path must NOT be visible to the LLM (LLM06)."""
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        assert "workspace" not in str(tool.inputs).lower()
+
+    def test_workspace_stored(self):
+        tool = SemgrepTool(workspace_path="/my/workspace")
+        assert tool.workspace_path == "/my/workspace"
+
+    def test_invalid_ruleset_returns_error(self):
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("/etc/passwd")
+        assert "Error" in result
+        assert "not allowed" in result
+
+    def test_empty_config_returns_error(self):
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("")
+        assert "Error" in result
+
+    @patch("src.tools.subprocess.run", side_effect=FileNotFoundError())
+    def test_semgrep_not_installed(self, mock_run):
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("p/python")
+        assert "Error" in result
+        assert "not installed" in result
+
+    @patch("src.tools.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="semgrep", timeout=300))
+    def test_semgrep_timeout(self, mock_run):
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("p/python")
+        assert "Error" in result
+        assert "timed out" in result
+
+    @patch("src.tools.subprocess.run")
+    def test_semgrep_no_findings(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        result = tool.forward("p/python")
+        assert "No findings" in result
+
+    @patch("src.tools.subprocess.run")
+    def test_semgrep_with_findings(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout=_make_semgrep_json([{
+                "rule_id": "python.exec",
+                "severity": "ERROR",
+                "path": "app.py",
+                "line": 42,
+                "message": "exec usage",
+            }]),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        result = tool.forward("p/python")
+        assert "1 finding" in result
+        assert "python.exec" in result
+
+    @patch("src.tools.subprocess.run")
+    def test_semgrep_empty_stdout(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout="",
+            stderr="some error",
+            returncode=2,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        result = tool.forward("p/python")
+        assert "Error" in result
+
+    @patch("src.tools.subprocess.run")
+    def test_command_uses_array_not_shell(self, mock_run):
+        """Security: verify subprocess is called with array, not shell=True."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/ws")
+        tool.forward("p/python,p/owasp-top-ten")
+
+        call_args = mock_run.call_args
+        cmd = call_args[0][0]  # First positional arg
+        assert isinstance(cmd, list)
+        assert cmd[0] == "semgrep"
+        assert "--json" in cmd
+        assert "--config" in cmd
+        assert "p/python" in cmd
+        assert "p/owasp-top-ten" in cmd
+        assert "/tmp/ws" in cmd
+        # shell should not be True
+        assert call_args.kwargs.get("shell") is not True
+
+    @patch("src.tools.subprocess.run")
+    def test_run_and_parse_returns_findings(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout=_make_semgrep_json([{
+                "rule_id": "python.exec",
+                "severity": "ERROR",
+                "path": "app.py",
+                "line": 42,
+                "message": "exec usage",
+            }]),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        output, findings = tool.run_and_parse("p/python")
+        assert "1 finding" in output
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.HIGH
+        assert findings[0].rule_id == "python.exec"
+
+    @patch("src.tools.subprocess.run")
+    def test_run_and_parse_error_returns_empty(self, mock_run):
+        mock_run.side_effect = FileNotFoundError()
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        output, findings = tool.run_and_parse("p/python")
+        assert "Error" in output
+        assert findings == []
+
+
+# --- Semgrep: side channel (LLM05) ---
+
+class TestSemgrepSideChannel:
+    """Test the side channel that provides raw findings to the gate.
+
+    Security (LLM05 — untrusted output handling):
+    The gate reads _last_raw_findings from the tool directly, independent
+    of what the agent reports. This prevents the agent from silently
+    dismissing findings.
+    """
+
+    def test_initial_state_empty(self):
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        assert tool._last_raw_findings == []
+        assert tool._last_config_used == []
+        assert tool._last_error == ""
+
+    @patch("src.tools.subprocess.run")
+    def test_populated_after_forward(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout=_make_semgrep_json([{
+                "rule_id": "python.exec",
+                "severity": "ERROR",
+                "path": "app.py",
+                "line": 42,
+                "message": "exec usage",
+            }]),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        tool.forward("p/python")
+
+        assert len(tool._last_raw_findings) == 1
+        assert tool._last_raw_findings[0].rule_id == "python.exec"
+        assert tool._last_raw_findings[0].severity == Severity.HIGH
+
+    @patch("src.tools.subprocess.run")
+    def test_config_used_populated(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        tool.forward("p/python,p/owasp-top-ten")
+
+        assert tool._last_config_used == ["p/python", "p/owasp-top-ten"]
+        assert tool._last_error == ""
+
+    @patch("src.tools.subprocess.run")
+    def test_reset_between_calls(self, mock_run):
+        """Side channel is reset at the start of each forward() call."""
+        # First call: one finding
+        mock_run.return_value = MagicMock(
+            stdout=_make_semgrep_json([{
+                "rule_id": "first.rule",
+                "severity": "ERROR",
+            }]),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        tool.forward("p/python")
+        assert len(tool._last_raw_findings) == 1
+
+        # Second call: no findings
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="",
+            returncode=0,
+        )
+        tool.forward("p/java")
+        assert len(tool._last_raw_findings) == 0
+        assert tool._last_config_used == ["p/java"]
+
+    def test_error_on_invalid_ruleset(self):
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        tool.forward("/etc/passwd")
+
+        assert tool._last_raw_findings == []
+        assert tool._last_config_used == []
+        assert "not allowed" in tool._last_error
+
+    @patch("src.tools.subprocess.run", side_effect=FileNotFoundError())
+    def test_error_on_semgrep_not_installed(self, mock_run):
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        tool.forward("p/python")
+
+        assert tool._last_raw_findings == []
+        assert tool._last_config_used == ["p/python"]
+        assert "not installed" in tool._last_error
+
+    @patch("src.tools.subprocess.run")
+    def test_error_on_empty_output(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout="",
+            stderr="some error",
+            returncode=2,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        tool.forward("p/python")
+
+        assert tool._last_raw_findings == []
+        assert tool._last_error != ""
+
+    @patch("src.tools.subprocess.run")
+    def test_no_findings_no_error(self, mock_run):
+        """Clean scan: no findings, no error."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        tool.forward("p/python")
+
+        assert tool._last_raw_findings == []
+        assert tool._last_error == ""
+        assert tool._last_config_used == ["p/python"]

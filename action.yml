@@ -23,6 +23,8 @@ outputs:
     description: 'Security verdict: allowed, manual_review, or blocked'
   continue_pipeline:
     description: 'true if the pipeline should continue, false if blocked'
+  findings_count:
+    description: 'Total number of confirmed security findings'
   reason:
     description: 'Human-readable explanation of the decision'
 

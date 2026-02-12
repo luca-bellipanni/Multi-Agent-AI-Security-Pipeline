@@ -1,1 +1,2 @@
 smolagents[litellm]>=1.0
+semgrep>=1.50

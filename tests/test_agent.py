@@ -1,8 +1,14 @@
 """Tests for the triage agent response parsing."""
 
+import json
 from unittest.mock import patch, MagicMock
 
-from src.agent import parse_triage_response, build_triage_task, create_triage_agent
+from src.agent import (
+    TRIAGE_SYSTEM_PROMPT,
+    parse_triage_response,
+    build_triage_task,
+    create_triage_agent,
+)
 from src.github_context import GitHubContext
 
 
@@ -22,46 +28,199 @@ def _make_context(**overrides) -> GitHubContext:
     return GitHubContext(**defaults)
 
 
-class TestParseTriage:
+# ── New format: context + recommended_agents ─────────────────────────
 
-    def test_valid_json(self):
-        response = '{"recommended_tools": ["semgrep"], "reason": "Python code changed"}'
-        result = parse_triage_response(response)
-        assert result["recommended_tools"] == ["semgrep"]
-        assert result["reason"] == "Python code changed"
 
-    def test_json_with_extra_text(self):
-        response = 'Here is my analysis:\n{"recommended_tools": ["gitleaks"], "reason": "Config files"}\nDone.'
+class TestParseTriageNewFormat:
+
+    def test_full_new_format(self):
+        response = json.dumps({
+            "context": {
+                "languages": ["python"],
+                "files_changed": 3,
+                "risk_areas": ["authentication"],
+                "has_dependency_changes": True,
+                "has_iac_changes": False,
+                "change_summary": "Auth module changes",
+            },
+            "recommended_agents": ["appsec"],
+            "reason": "Python code with auth changes",
+        })
         result = parse_triage_response(response)
-        assert result["recommended_tools"] == ["gitleaks"]
+        assert result["context"]["languages"] == ["python"]
+        assert result["context"]["files_changed"] == 3
+        assert result["context"]["risk_areas"] == ["authentication"]
+        assert result["context"]["has_dependency_changes"] is True
+        assert result["context"]["has_iac_changes"] is False
+        assert result["context"]["change_summary"] == "Auth module changes"
+        assert result["recommended_agents"] == ["appsec"]
+        assert result["reason"] == "Python code with auth changes"
+
+    def test_multiple_languages_and_risk_areas(self):
+        response = json.dumps({
+            "context": {
+                "languages": ["python", "javascript"],
+                "files_changed": 10,
+                "risk_areas": ["api_handlers", "dependencies"],
+                "has_dependency_changes": True,
+                "has_iac_changes": True,
+                "change_summary": "Full stack changes",
+            },
+            "recommended_agents": ["appsec"],
+            "reason": "Multiple languages",
+        })
+        result = parse_triage_response(response)
+        assert len(result["context"]["languages"]) == 2
+        assert "javascript" in result["context"]["languages"]
+        assert result["context"]["has_iac_changes"] is True
+
+    def test_empty_agents_defaults_to_appsec(self):
+        response = json.dumps({
+            "context": {"languages": ["python"]},
+            "recommended_agents": [],
+            "reason": "test",
+        })
+        result = parse_triage_response(response)
+        assert result["recommended_agents"] == ["appsec"]
+
+    def test_missing_agents_field_defaults_to_appsec(self):
+        response = json.dumps({
+            "context": {"languages": ["go"]},
+            "reason": "test",
+        })
+        result = parse_triage_response(response)
+        assert result["recommended_agents"] == ["appsec"]
+
+    def test_invalid_agents_filtered(self):
+        response = json.dumps({
+            "context": {"languages": []},
+            "recommended_agents": [123, None, "appsec"],
+            "reason": "test",
+        })
+        result = parse_triage_response(response)
+        assert result["recommended_agents"] == ["appsec"]
+
+    def test_missing_context_fields_get_defaults(self):
+        response = json.dumps({
+            "context": {},
+            "recommended_agents": ["appsec"],
+            "reason": "minimal context",
+        })
+        result = parse_triage_response(response)
+        assert result["context"]["languages"] == []
+        assert result["context"]["files_changed"] == 0
+        assert result["context"]["risk_areas"] == []
+        assert result["context"]["has_dependency_changes"] is False
+        assert result["context"]["has_iac_changes"] is False
+        assert result["context"]["change_summary"] == ""
+
+    def test_non_list_languages_defaults_to_empty(self):
+        response = json.dumps({
+            "context": {"languages": "python"},
+            "recommended_agents": ["appsec"],
+            "reason": "test",
+        })
+        result = parse_triage_response(response)
+        assert result["context"]["languages"] == []
+
+    def test_non_int_files_changed_defaults_to_zero(self):
+        response = json.dumps({
+            "context": {"files_changed": "many"},
+            "recommended_agents": ["appsec"],
+            "reason": "test",
+        })
+        result = parse_triage_response(response)
+        assert result["context"]["files_changed"] == 0
+
+    def test_non_string_reason_replaced(self):
+        response = json.dumps({
+            "context": {"languages": []},
+            "recommended_agents": ["appsec"],
+            "reason": 42,
+        })
+        result = parse_triage_response(response)
+        assert result["reason"] == "No reason provided."
+
+    def test_json_with_surrounding_text(self):
+        response = (
+            'Here is my analysis:\n'
+            + json.dumps({
+                "context": {"languages": ["python"]},
+                "recommended_agents": ["appsec"],
+                "reason": "test",
+            })
+            + '\nDone.'
+        )
+        result = parse_triage_response(response)
+        assert result["context"]["languages"] == ["python"]
+
+
+# ── Backward compatibility: old format ───────────────────────────────
+
+
+class TestParseTriageBackwardCompat:
+
+    def test_old_format_with_semgrep(self):
+        response = '{"recommended_tools": [{"tool": "semgrep"}], "reason": "Python code"}'
+        result = parse_triage_response(response)
+        assert "appsec" in result["recommended_agents"]
+        assert "context" in result
+        assert result["reason"] == "Python code"
+
+    def test_old_format_flat_strings(self):
+        response = '{"recommended_tools": ["semgrep", "gitleaks"], "reason": "Full scan"}'
+        result = parse_triage_response(response)
+        assert "appsec" in result["recommended_agents"]
+        assert isinstance(result["context"], dict)
+
+    def test_old_format_mixed(self):
+        response = json.dumps({
+            "recommended_tools": [
+                "gitleaks",
+                {"tool": "semgrep", "config": ["p/python"]},
+            ],
+            "reason": "Mix",
+        })
+        result = parse_triage_response(response)
+        assert "appsec" in result["recommended_agents"]
+
+    def test_old_format_context_stub(self):
+        response = '{"recommended_tools": ["semgrep"], "reason": "old"}'
+        result = parse_triage_response(response)
+        ctx = result["context"]
+        assert ctx["languages"] == []
+        assert "legacy" in ctx["change_summary"].lower()
+
+
+# ── Error handling ───────────────────────────────────────────────────
+
+
+class TestParseTriageErrors:
 
     def test_invalid_json_returns_default(self):
         result = parse_triage_response("this is not json at all")
-        assert "semgrep" in result["recommended_tools"]
-        assert "gitleaks" in result["recommended_tools"]
-        assert "could not be parsed" in result["reason"]
+        assert result["recommended_agents"] == ["appsec"]
+        assert "could not be parsed" in result["reason"].lower()
 
     def test_empty_response_returns_default(self):
         result = parse_triage_response("")
-        assert len(result["recommended_tools"]) > 0
+        assert result["recommended_agents"] == ["appsec"]
 
     def test_none_response_returns_default(self):
         result = parse_triage_response(None)
-        assert len(result["recommended_tools"]) > 0
+        assert result["recommended_agents"] == ["appsec"]
 
-    def test_missing_tools_field_returns_default(self):
-        result = parse_triage_response('{"reason": "no tools field"}')
-        assert "semgrep" in result["recommended_tools"]
+    def test_no_recognized_format_returns_default(self):
+        result = parse_triage_response('{"some_random_field": 123}')
+        assert result["recommended_agents"] == ["appsec"]
 
-    def test_missing_reason_gets_placeholder(self):
-        result = parse_triage_response('{"recommended_tools": ["semgrep"]}')
-        assert result["recommended_tools"] == ["semgrep"]
-        assert isinstance(result["reason"], str)
+    def test_default_has_valid_context(self):
+        result = parse_triage_response("garbage")
+        assert isinstance(result["context"], dict)
+        assert isinstance(result["context"]["languages"], list)
 
-    def test_empty_tools_list_is_valid(self):
-        result = parse_triage_response('{"recommended_tools": [], "reason": "Docs only"}')
-        assert result["recommended_tools"] == []
-        assert result["reason"] == "Docs only"
+
+# ── build_triage_task ────────────────────────────────────────────────
 
 
 class TestBuildTriageTask:
@@ -91,13 +250,19 @@ class TestBuildTriageTask:
         assert "No PR number" in task
         assert "Fetch" not in task
 
+    def test_mentions_context(self):
+        task = build_triage_task(_make_context())
+        assert "context" in task.lower()
+
+
+# ── create_triage_agent ──────────────────────────────────────────────
+
 
 class TestCreateTriageAgent:
 
     @patch("src.agent.LiteLLMModel")
     @patch("src.agent.CodeAgent")
     def test_default_no_tools(self, mock_code_agent, mock_model):
-        """When no tools passed, agent gets empty list."""
         create_triage_agent("key", "model")
         call_kwargs = mock_code_agent.call_args
         assert call_kwargs.kwargs.get("tools") == []
@@ -105,7 +270,6 @@ class TestCreateTriageAgent:
     @patch("src.agent.LiteLLMModel")
     @patch("src.agent.CodeAgent")
     def test_tools_passed_through(self, mock_code_agent, mock_model):
-        """When tools are provided, they reach the CodeAgent."""
         fake_tool = MagicMock()
         create_triage_agent("key", "model", tools=[fake_tool])
         call_kwargs = mock_code_agent.call_args
@@ -114,7 +278,24 @@ class TestCreateTriageAgent:
     @patch("src.agent.LiteLLMModel")
     @patch("src.agent.CodeAgent")
     def test_max_steps_is_three(self, mock_code_agent, mock_model):
-        """max_steps should be 3 to allow tool use + response."""
         create_triage_agent("key", "model")
         call_kwargs = mock_code_agent.call_args
         assert call_kwargs.kwargs.get("max_steps") == 3
+
+
+# ── System prompt checks ─────────────────────────────────────────────
+
+
+class TestTriageSystemPrompt:
+
+    def test_prompt_warns_about_untrusted_input(self):
+        assert "UNTRUSTED INPUT" in TRIAGE_SYSTEM_PROMPT
+
+    def test_prompt_does_not_recommend_rulesets(self):
+        assert "Do NOT recommend specific rulesets" in TRIAGE_SYSTEM_PROMPT
+
+    def test_prompt_mentions_context(self):
+        assert "context" in TRIAGE_SYSTEM_PROMPT.lower()
+
+    def test_prompt_mentions_risk_areas(self):
+        assert "risk_areas" in TRIAGE_SYSTEM_PROMPT

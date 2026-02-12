@@ -6,10 +6,14 @@ Secrets (tokens, keys) are injected via the constructor — never
 exposed as LLM-visible parameters.
 """
 
+import json as json_module
 import os
+import subprocess
 
 import requests
 from smolagents import Tool
+
+from src.models import Finding, Severity
 
 
 # --- Constants ---
@@ -235,3 +239,203 @@ class FetchPRFilesTool(Tool):
                 break
 
         return _format_pr_files(pr_number, title, all_files)
+
+
+# --- Semgrep constants ---
+
+# Allowed Semgrep ruleset prefixes (security: prevent path traversal)
+ALLOWED_RULESET_PREFIXES = ("p/", "r/", "s/")
+
+# Maximum number of rulesets per scan (prevent resource abuse — LLM10)
+MAX_RULESETS = 10
+
+# Default timeout for semgrep execution in seconds
+SEMGREP_TIMEOUT = 300
+
+# Semgrep severity → our Severity mapping
+SEMGREP_SEVERITY_MAP = {
+    "ERROR": Severity.HIGH,
+    "WARNING": Severity.MEDIUM,
+    "INFO": Severity.LOW,
+}
+
+
+def parse_semgrep_findings(raw_json: str) -> list[Finding]:
+    """Parse raw Semgrep JSON output into Finding objects."""
+    try:
+        data = json_module.loads(raw_json)
+    except (json_module.JSONDecodeError, TypeError):
+        return []
+
+    findings = []
+    for r in data.get("results", []):
+        sev_str = r.get("extra", {}).get("severity", "INFO")
+        severity = SEMGREP_SEVERITY_MAP.get(sev_str, Severity.LOW)
+
+        findings.append(Finding(
+            tool="semgrep",
+            rule_id=r.get("check_id", "unknown"),
+            path=r.get("path", "unknown"),
+            line=r.get("start", {}).get("line", 0),
+            severity=severity,
+            message=r.get("extra", {}).get("message", ""),
+        ))
+    return findings
+
+
+def _format_semgrep_findings(raw_json: str) -> str:
+    """Format raw Semgrep JSON into human-readable output for the agent."""
+    try:
+        data = json_module.loads(raw_json)
+    except (json_module.JSONDecodeError, TypeError):
+        return "Error: Could not parse Semgrep output."
+
+    results = data.get("results", [])
+    errors = data.get("errors", [])
+
+    if not results and not errors:
+        return "Semgrep scan complete. No findings."
+
+    lines = [f"Semgrep scan complete. {len(results)} finding(s):"]
+    for r in results:
+        check_id = r.get("check_id", "unknown")
+        path = r.get("path", "unknown")
+        line = r.get("start", {}).get("line", 0)
+        severity = r.get("extra", {}).get("severity", "INFO")
+        message = r.get("extra", {}).get("message", "No message")
+        lines.append(f"  [{severity}] {check_id} at {path}:{line} — {message}")
+
+    if errors:
+        lines.append(f"\n{len(errors)} scan error(s) occurred.")
+
+    return "\n".join(lines)
+
+
+def _validate_rulesets(config: str) -> tuple[list[str], str | None]:
+    """Validate and parse comma-separated rulesets.
+
+    Returns (validated_list, error_message_or_None).
+    Security: allowlist prevents path traversal via --config.
+    """
+    rulesets = [r.strip() for r in config.split(",") if r.strip()]
+    if not rulesets:
+        return [], "Error: No rulesets provided."
+    if len(rulesets) > MAX_RULESETS:
+        return [], f"Error: Too many rulesets ({len(rulesets)}). Maximum is {MAX_RULESETS}."
+
+    for rs in rulesets:
+        if not any(rs.startswith(prefix) for prefix in ALLOWED_RULESET_PREFIXES):
+            return [], f"Error: Ruleset '{rs}' not allowed. Must start with p/, r/, or s/."
+
+    return rulesets, None
+
+
+class SemgrepTool(Tool):
+    """Runs Semgrep SAST scanner on the workspace.
+
+    The workspace path is injected via the constructor (never visible to
+    the LLM). The config (rulesets) is the only agent-controllable input,
+    validated against an allowlist to prevent path traversal.
+    """
+
+    name = "run_semgrep"
+    description = (
+        "Runs Semgrep static analysis on the workspace with specified rulesets. "
+        "Returns findings including rule ID, severity, file path, line number, "
+        "and a description of each issue found. Use Semgrep registry rulesets "
+        "like p/python, p/security-audit, p/owasp-top-ten."
+    )
+    inputs = {
+        "config": {
+            "type": "string",
+            "description": (
+                "Comma-separated Semgrep rulesets to use, e.g. "
+                "'p/python,p/owasp-top-ten'. Must be Semgrep registry "
+                "rulesets (p/..., r/..., s/...)."
+            ),
+        }
+    }
+    output_type = "string"
+
+    def __init__(self, workspace_path: str, timeout: int = SEMGREP_TIMEOUT, **kwargs):
+        self.workspace_path = workspace_path
+        self.timeout = timeout
+        # Side channel for the gate (LLM05: raw findings independent of agent)
+        self._last_raw_findings: list[Finding] = []
+        self._last_config_used: list[str] = []
+        self._last_error: str = ""
+        super().__init__(**kwargs)
+
+    def forward(self, config: str) -> str:
+        """Run semgrep with the given rulesets, return human-readable findings.
+
+        Side effect: populates _last_raw_findings for the gate to read
+        independently of what the agent reports (LLM05: untrusted output).
+        """
+        # Reset side channel
+        self._last_raw_findings = []
+        self._last_config_used = []
+        self._last_error = ""
+
+        rulesets, val_error = _validate_rulesets(config)
+        if val_error:
+            self._last_error = val_error
+            return val_error
+
+        self._last_config_used = rulesets
+
+        raw_json, error = self._execute(config)
+        if error:
+            self._last_error = error
+            return error
+
+        # Side channel: save raw findings before returning to the agent
+        self._last_raw_findings = parse_semgrep_findings(raw_json)
+        return _format_semgrep_findings(raw_json)
+
+    def run_and_parse(self, config: str) -> tuple[str, list[Finding]]:
+        """Run semgrep and return (human_readable_output, list[Finding]).
+
+        Used by DecisionEngine for structured access to findings.
+        """
+        raw_json, error = self._execute(config)
+        if error:
+            return error, []
+        human_readable = _format_semgrep_findings(raw_json)
+        findings = parse_semgrep_findings(raw_json)
+        return human_readable, findings
+
+    def _execute(self, config: str) -> tuple[str, str | None]:
+        """Run semgrep subprocess. Returns (raw_json_stdout, error_or_None).
+
+        Security (code-security/command-injection):
+        - Array form subprocess, NEVER shell=True
+        - Rulesets validated against allowlist
+        """
+        rulesets, error = _validate_rulesets(config)
+        if error:
+            return "", error
+
+        # Build command — array form prevents command injection
+        cmd = ["semgrep", "--json", "--quiet"]
+        for rs in rulesets:
+            cmd.extend(["--config", rs])
+        cmd.append(self.workspace_path)
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+        except FileNotFoundError:
+            return "", "Error: Semgrep is not installed or not accessible."
+        except subprocess.TimeoutExpired:
+            return "", f"Error: Semgrep timed out after {self.timeout} seconds."
+
+        if not result.stdout.strip():
+            stderr_preview = result.stderr[:500] if result.stderr else "no output"
+            return "", f"Error: Semgrep produced no output. stderr: {stderr_preview}"
+
+        return result.stdout, None

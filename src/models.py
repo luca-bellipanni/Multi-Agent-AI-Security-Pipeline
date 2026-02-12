@@ -20,6 +20,29 @@ class Severity(str, Enum):
     CRITICAL = "critical"
 
 
+SEVERITY_ORDER = [Severity.NONE, Severity.LOW, Severity.MEDIUM,
+                  Severity.HIGH, Severity.CRITICAL]
+
+
+@dataclass
+class Finding:
+    tool: str
+    rule_id: str
+    path: str
+    line: int
+    severity: Severity
+    message: str
+
+
+@dataclass
+class ToolResult:
+    tool: str
+    success: bool
+    findings: list[Finding]
+    error: str = ""
+    config_used: list[str] = field(default_factory=list)
+
+
 @dataclass
 class Decision:
     verdict: Verdict
@@ -28,19 +51,26 @@ class Decision:
     selected_tools: list[str]
     reason: str
     mode: str
+    findings_count: int = 0
+    tool_results: list[ToolResult] = field(default_factory=list)
+    analysis_report: str = ""
+    safety_warnings: list[dict] = field(default_factory=list)
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
 
     def to_dict(self) -> dict:
         return {
-            "version": "1.0",
+            "version": "2.0",
             "verdict": self.verdict.value,
             "continue_pipeline": self.continue_pipeline,
             "max_severity": self.max_severity.value,
             "selected_tools": self.selected_tools,
+            "findings_count": self.findings_count,
             "reason": self.reason,
             "mode": self.mode,
+            "analysis_report": self.analysis_report,
+            "safety_warnings": self.safety_warnings,
             "timestamp": self.timestamp,
         }
 
@@ -52,5 +82,7 @@ class Decision:
         return {
             "decision": self.verdict.value,
             "continue_pipeline": str(self.continue_pipeline).lower(),
+            "findings_count": str(self.findings_count),
             "reason": self.reason,
+            "safety_warnings_count": str(len(self.safety_warnings)),
         }
