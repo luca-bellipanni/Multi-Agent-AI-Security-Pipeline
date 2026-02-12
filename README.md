@@ -61,9 +61,9 @@ Every tool runs on every PR. A documentation change triggers the same 15-minute 
               │                                                        │
               │  Deterministic rules. NOT an LLM. NOT hackable.        │
               │                                                        │
-              │  if CRITICAL finding  → BLOCKED     (always)           │
-              │  if HIGH + enforce    → BLOCKED     (always)           │
-              │  if MEDIUM + enforce  → MANUAL_REVIEW                  │
+              │  if CRITICAL finding  → BLOCKED     (enforce)          │
+              │  if findings present  → MANUAL_REVIEW (enforce)        │
+              │  if clean scan        → ALLOWED     (enforce)          │
               │  if shadow mode       → ALLOWED     (observe only)     │
               │                                                        │
               │  No prompt injection can override these rules.         │
@@ -96,16 +96,16 @@ Semgrep raw output (5 findings):
 
 | Step | Component | What it does |
 |------|-----------|-------------|
-| 1 | **Triage Agent** | Sees Python files changed, recommends: "Run Semgrep + Gitleaks" |
+| 1 | **Triage Agent** | Reads PR metadata + changed files and builds structured context for specialist agents |
 | 2 | **Semgrep** | Scans code, produces 5 raw findings |
 | 3 | **Analyzer Agent** | Reviews each finding against the actual code: |
 | | | Finding 1: "Real SQLi, user input concatenated in query" — **confirmed HIGH** |
 | | | Finding 2: "This is in a test file, not production" — **dismissed** |
 | | | Finding 4: "Auth endpoint with no validation" — **upgraded to HIGH** |
 | | | Finding 3, 5: "Low risk / intentional pattern" — **noted, not blocking** |
-| 4 | **Gate (code)** | Reads the Analyzer's structured report: `confirmed_max_severity = HIGH` → **BLOCKED** |
+| 4 | **Gate (code)** | Uses raw scanner findings + deterministic policy (CRITICAL -> **BLOCKED**, otherwise enforce -> **MANUAL_REVIEW**) |
 
-The PR is blocked for the **right reason** (the real SQLi), not for a false positive in a test file. The PR comment explains exactly what was found and why.
+The PR is stopped for the **right reason** (the real SQLi), not for a false positive in a test file. In `enforce` this becomes at least `manual_review` and prevents silent merge.
 
 ### What if a developer tries prompt injection?
 
@@ -118,7 +118,7 @@ The developer adds this comment in the code:
 
 - The **Analyzer Agent** might be influenced: "The comment says it's safe..."
 - But **Semgrep** is a program, not an LLM — it still reports the finding
-- And the **Gate** is Python code: `if confirmed_high → BLOCKED`. No comment can change an `if` statement.
+- And the **Gate** is Python code: policy is deterministic (`critical -> blocked`, findings -> manual review). No comment can change an `if` statement.
 
 The gate can even detect suspicious Analyzer behavior:
 ```python
@@ -145,10 +145,10 @@ if raw_findings.has_critical and analyzer.dismissed_all_criticals:
 
 | Component | Status | Description |
 |-----------|--------|-------------|
-| Triage Agent | Active | Recommends which security tools to run |
-| Analyzer Agent | Planned | Will analyze tool findings (Step 5+) |
+| Triage Agent | Active | Produces PR context and recommends specialist agents |
+| Analyzer Agent | Active | Runs Semgrep analysis and returns structured security report |
 | Gate (code) | Active | Deterministic security rules |
-| Semgrep tool | Planned | SAST — code vulnerability scanning |
+| Semgrep tool | Active | SAST — code vulnerability scanning |
 | Gitleaks tool | Planned | Secret detection |
 | Trivy tool | Planned | SCA — dependency/container scanning |
 | PR Reporting | Planned | Comments, checks, artifacts |
@@ -199,6 +199,7 @@ jobs:
 |------|-------------|
 | `decision` | Security verdict: `allowed`, `manual_review`, or `blocked` |
 | `continue_pipeline` | `true` if the pipeline should continue, `false` if blocked |
+| `findings_count` | Total number of raw findings considered by the gate |
 | `reason` | Human-readable explanation of the decision (includes AI reasoning when available) |
 
 ## Modes
@@ -219,7 +220,7 @@ This means you can adopt the action immediately, even before configuring an AI p
 - **Python 3.12** on Docker (GitHub Actions container)
 - **[smolagents](https://github.com/huggingface/smolagents)** — lightweight agent framework by HuggingFace
 - **[LiteLLM](https://github.com/BerriAI/litellm)** — unified LLM interface (100+ providers)
-- **Semgrep** — SAST (planned)
+- **Semgrep** — SAST (active)
 - **Gitleaks** — secret detection (planned)
 - **Trivy** — SCA/container scanning (planned)
 
@@ -228,13 +229,17 @@ This means you can adopt the action immediately, even before configuring an AI p
 ```
 src/
 ├── main.py              # Orchestrator — reads context, runs engine, writes outputs
-├── models.py            # Data contracts — Decision, Verdict, Severity enums
+├── models.py            # Data contracts — Decision, Finding, ToolResult, enums
 ├── github_context.py    # Environment parser — GitHub Actions → clean dataclass
-├── decision_engine.py   # Triage AI → Gate (deterministic rules)
-└── agent.py             # Triage Agent — smolagents + LiteLLM setup
+├── decision_engine.py   # Triage + Analyzer + deterministic gate
+├── agent.py             # Triage Agent — context builder
+├── analyzer_agent.py    # AppSec specialist agent
+└── tools.py             # GitHub + Semgrep tools
 tests/
-├── test_agent.py        # 12 tests — response parsing, task building
-└── test_decision_engine.py  # 17 tests — modes, fallback, gate rules, integration
+├── test_agent.py
+├── test_analyzer_agent.py
+├── test_decision_engine.py
+└── test_tools.py
 ```
 
 ## License

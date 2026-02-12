@@ -60,12 +60,22 @@ inputs:
     description: 'shadow (observe only) or enforce (can block the PR)'
     required: false
     default: 'shadow'
+  ai_api_key:
+    description: 'Optional API key for LLM provider'
+    required: false
+    default: ''
+  ai_model:
+    description: 'Model ID for LiteLLM'
+    required: false
+    default: 'gpt-4o-mini'
 
 outputs:
   decision:
     description: 'Security verdict: allowed, manual_review, or blocked'
   continue_pipeline:
     description: 'true if the pipeline should continue, false if blocked'
+  findings_count:
+    description: 'Total raw findings considered by the gate'
   reason:
     description: 'Human-readable explanation of the decision'
 
@@ -75,6 +85,8 @@ runs:
   env:
     INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
     INPUT_MODE: ${{ inputs.mode }}
+    INPUT_AI_API_KEY: ${{ inputs.ai_api_key }}
+    INPUT_AI_MODEL: ${{ inputs.ai_model }}
 ```
 
 ### Cosa fa

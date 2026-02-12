@@ -6,10 +6,13 @@ Guida di studio per lo Step 3 del progetto Agentic AppSec Pipeline.
 
 ## Cosa abbiamo fatto
 
-Abbiamo integrato il primo agente AI nel pipeline. Il `DecisionEngine` ora ha due fasi:
+Abbiamo integrato il primo agente AI nel pipeline e aperto la strada
+all'architettura multi-agent. Nel codice attuale il `DecisionEngine`
+ha tre fasi:
 
-1. **Triage AI** — un agente smolagents che ragiona su cosa fare
-2. **Gate deterministico** — codice Python con regole fisse
+1. **Triage AI** — costruisce contesto e decide quali specialist agent invocare
+2. **Analyzer/AppSec AI** — esegue Semgrep e analizza i finding
+3. **Gate deterministico** — codice Python con regole fisse
 
 Se l'AI non e' configurata o fallisce, il sistema funziona esattamente come prima (Step 2).
 
@@ -21,20 +24,22 @@ DecisionEngine.decide(ctx)
       else      → MANUAL_REVIEW
 ```
 
-### Dopo (Step 3) — triage AI + gate
+### Dopo (Step 3) — triage AI + gate (fondazione)
 
 ```
 DecisionEngine.decide(ctx)
-  ├── _run_triage(ctx)            → chiede all'AI "quali tool lanciare?"
+  ├── _run_triage(ctx)            → chiede all'AI "che contesto vedi?"
   │     ├── AI disponibile?
-  │     │   ├── SI  → agent.run(task) → parsa JSON → {tools, reason}
-  │     │   └── NO  → {tools: [], reason: "No AI configured"}
+  │     │   ├── SI  → agent.run(task) → JSON: {context, recommended_agents, reason}
+  │     │   └── NO  → fallback deterministico
   │     └── AI fallisce?
-  │         └── warning + fallback deterministico
+  │         └── warning + fallback
   │
-  └── _apply_gate(ctx, triage)    → regole fisse in Python
-        ├── shadow  → ALLOWED  (sempre, l'AI non cambia questo)
-        └── enforce → MANUAL_REVIEW (finche' non abbiamo tool results)
+  ├── _run_analyzer(ctx, triage)  → specialist agent + Semgrep
+  │
+  └── _apply_gate(...)            → regole fisse su finding raw
+        ├── shadow  → ALLOWED (sempre)
+        └── enforce → BLOCKED/MANUAL_REVIEW/ALLOWED in base ai finding
 ```
 
 ---
@@ -44,10 +49,10 @@ DecisionEngine.decide(ctx)
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │  TRIAGE AI  │ ──→ │  ANALYZER AI     │ ──→ │  GATE (codice)  │
-│  (Step 3)   │     │  (Step 5+)       │     │  (gia' attivo)  │
+│  (attivo)   │     │  (attivo)        │     │  (attivo)       │
 │             │     │                  │     │                 │
-│  "cosa      │     │  lancia tool,    │     │  regole fisse,  │
-│   lanciare?"│     │  analizza finding│     │  non hackerabile│
+│  "che       │     │  esegue Semgrep, │     │  regole fisse,  │
+│   contesto?"│     │  analizza finding│     │  non hackerabile│
 └─────────────┘     └──────────────────┘     └─────────────────┘
    modello             modello                    Python
    economico           smart                      zero token
@@ -60,10 +65,10 @@ DecisionEngine.decide(ctx)
    Nessun commento furbo nella PR puo' cambiare questa regola.
 
 2. **Il triage e' economico** → usa un modello piccolo (GPT-4o-mini).
-   Decide solo QUALI tool lanciare, non analizza i risultati.
+   Produce contesto strutturato e raccomanda specialist agent, non decide il verdict.
 
-3. **L'analyzer e' smart** → usa un modello piu' potente, ma solo quando
-   ci sono finding da analizzare. Su PR di sola documentazione, non parte.
+3. **L'analyzer e' smart** → usa un modello piu' potente, esegue Semgrep
+   e produce analisi strutturata (confirmed/dismissed/summary/risk_assessment).
 
 4. **Contesto separato** → ogni agente riceve solo le informazioni che
    gli servono. Il triage non vede i finding, l'analyzer non decide i tool.
@@ -91,28 +96,28 @@ from smolagents import CodeAgent, LiteLLMModel
 #### create_triage_agent()
 
 ```python
-def create_triage_agent(api_key: str, model_id: str) -> CodeAgent:
+def create_triage_agent(api_key: str, model_id: str, tools: list | None = None) -> CodeAgent:
     model = LiteLLMModel(
         model_id=model_id,
         api_key=api_key,
         temperature=0.1,      # quasi deterministico
     )
     return CodeAgent(
-        tools=[],              # nessun tool per ora
+        tools=tools or [],
         model=model,
         system_prompt=TRIAGE_SYSTEM_PROMPT,
-        max_steps=2,           # limita i passi di ragionamento
+        max_steps=3,           # 1 step in piu' per tool call + risposta
     )
 ```
 
 **`temperature=0.1`**: quanto l'LLM e' "creativo". 0 = sempre la stessa risposta,
 1 = molto variabile. Per security triage vogliamo risposte consistenti → 0.1.
 
-**`max_steps=2`**: limita quanti passi l'agente puo' fare. Il triage e' una
+**`max_steps=3`**: limita quanti passi l'agente puo' fare. Il triage e' una
 decisione semplice, non ha bisogno di ragionare a lungo. Meno passi = meno token = meno costi.
 
-**`tools=[]`**: per ora il triage non ha tool da chiamare. Ragiona solo sui
-metadati della PR. In futuro potrebbe avere un tool per leggere la lista dei file cambiati.
+**`tools=tools or []`**: il triage puo' usare tool (es. `fetch_pr_files`) quando disponibili.
+Se mancano token/repository/PR number, puo' comunque ragionare in best-effort.
 
 #### Il system prompt (anti-prompt-injection)
 
@@ -137,8 +142,16 @@ il gate Python applica le regole fisse comunque.
 ```python
 def parse_triage_response(response: str) -> dict:
     default = {
-        "recommended_tools": ["semgrep", "gitleaks"],
-        "reason": "AI response could not be parsed, recommending all tools.",
+        "context": {
+            "languages": [],
+            "files_changed": 0,
+            "risk_areas": [],
+            "has_dependency_changes": False,
+            "has_iac_changes": False,
+            "change_summary": "Triage response could not be parsed."
+        },
+        "recommended_agents": ["appsec"],
+        "reason": "AI response could not be parsed, using safe fallback."
     }
     ...
 ```
@@ -149,10 +162,10 @@ intorno, o roba completamente sbagliata. Il parser:
 1. Cerca `{...}` nella risposta (l'LLM a volte aggiunge testo prima/dopo)
 2. Prova a parsare come JSON
 3. Valida che i campi richiesti ci siano
-4. Se qualcosa va storto → **default sicuro**: raccomanda TUTTI i tool
+4. Se qualcosa va storto → **default sicuro**: contesto minimo + agente `appsec`
 
-**Il default e' sicuro per design**: se non capisci la risposta, lancia tutto.
-Meglio un scan in piu' che un vuln non trovata.
+**Il default e' sicuro per design**: se non capisci la risposta, non salti il flusso.
+Passi comunque al gate con fallback deterministico.
 
 ---
 
@@ -163,17 +176,19 @@ La struttura e' ora:
 ```python
 class DecisionEngine:
     def decide(self, ctx) -> Decision:
-        triage = self._run_triage(ctx)      # fase 1: AI
-        return self._apply_gate(ctx, triage) # fase 2: codice
+        triage = self._run_triage(ctx)                  # fase 1: Triage AI
+        tool_results, analysis = self._run_analyzer(ctx, triage)  # fase 2: Analyzer AI
+        return self._apply_gate(ctx, triage, tool_results, analysis)  # fase 3: gate
 
     def _run_triage(self, ctx) -> dict:
         # se no API key → fallback
         # se errore AI → warning + fallback
         # altrimenti → chiama agente
 
-    def _apply_gate(self, ctx, triage) -> Decision:
-        # regole fisse: shadow → ALLOWED, enforce → MANUAL_REVIEW
-        # include il reasoning dell'AI nel campo "reason"
+    def _apply_gate(self, ctx, triage, tool_results, analysis) -> Decision:
+        # regole fisse su finding raw:
+        # shadow => always ALLOWED
+        # enforce => CRITICAL BLOCKED, findings present MANUAL_REVIEW, clean ALLOWED
 ```
 
 **Lazy import**:
@@ -188,10 +203,9 @@ Perche' `src.agent` importa `smolagents`, che e' una dipendenza pesante.
 Se non c'e' l'API key, non importiamo mai smolagents → piu' veloce, meno
 memoria, e funziona anche se smolagents non e' installato.
 
-**Il gate non cambia**:
-La logica del gate e' IDENTICA a Step 2. L'unica differenza e' che il
-campo `reason` ora include il ragionamento dell'AI. Le regole di sicurezza
-(shadow → allowed, enforce → manual_review) sono le stesse.
+**Il gate resta deterministic, ma si evolve**:
+Rispetto a Step 2 ora valuta finding reali (raw) e non solo `mode`.
+Questo rende il progetto utile davvero in `enforce`.
 
 Questo e' il principio: **l'AI arricchisce, non decide**.
 
@@ -241,19 +255,19 @@ build piu' veloce.
 
 ## I test
 
-### tests/test_agent.py — 12 test
+### tests/test_agent.py — test sul triage
 
 **TestParseTriage** (8 test): verifica il parsing della risposta AI.
 - JSON valido → parsato correttamente
 - JSON con testo intorno → estratto e parsato
-- Risposta invalida → default sicuro (tutti i tool)
+- Risposta invalida → default sicuro (context + recommended_agents)
 - Risposta vuota/None → default sicuro
 - Campi mancanti → gestiti gracefully
 
 **TestBuildTriageTask** (4 test): verifica che il task prompt contenga
 le informazioni giuste (repository, mode, PR number).
 
-### tests/test_decision_engine.py — 17 test (9 nuovi)
+### tests/test_decision_engine.py — test gate + fallback + safety net
 
 **TestFallbackNoApiKey** (3 test):
 ```python
@@ -279,11 +293,11 @@ def test_shadow_fallback_on_ai_error(self, mock_agent):
 fa si' che il mock lanci un'eccezione quando viene chiamato. Cosi' simuliamo
 un errore dell'API senza fare una vera chiamata.
 
-**TestTriageIntegration** (4 test): testa il gate direttamente con
-risultati di triage simulati, verificando che:
-- I tool raccomandati finiscano nella Decision
-- Il reasoning AI finisca nel campo reason
-- Il gate NON cambi verdict in base a cosa dice l'AI (shadow = sempre ALLOWED)
+**TestTriageIntegration / Gate**: verifica che:
+- il triage influenzi il contesto, non il verdict finale
+- il gate usi finding raw per la decisione
+- shadow resti sempre `allowed`
+- enforce applichi policy su severita'
 
 ---
 
@@ -356,22 +370,19 @@ entrypoint.sh
         │     ├── _run_triage(ctx)
         │     │     ├── [senza API key] → fallback
         │     │     └── [con API key]   → smolagents → LiteLLM → LLM → JSON
-        │     └── _apply_gate(ctx, triage)
-        │           └── shadow → ALLOWED / enforce → MANUAL_REVIEW
+        │     ├── _run_analyzer(ctx, triage)
+        │     └── _apply_gate(...)
+        │           └── shadow → ALLOWED / enforce → policy su finding raw
         ├── write_outputs(decision.to_outputs())
         └── exit 0 o 1
 ```
 
 ---
 
-## Cosa viene dopo (Step 4+)
+## Cosa viene dopo (dallo stato attuale)
 
-**Step 4**: L'agente legge la PR — un `@tool` smolagents che usa GitHub API
-per ottenere il diff, i file cambiati, la descrizione. Il triage avra' contesto
-reale su cui ragionare.
+Le prossime evoluzioni naturali sono:
 
-**Step 5**: Primo security tool — Semgrep wrappato come `@tool` smolagents.
-L'Analyzer Agent prendera' vita qui, analizzando i finding di Semgrep.
-
-Il pattern `@tool` e' la base: ogni strumento di sicurezza diventa un tool
-che l'agente puo' decidere di chiamare o meno.
+1. Integrare `gitleaks` e `trivy` nel runtime reale, non solo a livello concettuale.
+2. Aggiungere azioni PR automatiche (commenti, label, reviewer request, issue).
+3. Introdurre memoria cross-run/RAG persistente per ridurre rumore nel tempo.

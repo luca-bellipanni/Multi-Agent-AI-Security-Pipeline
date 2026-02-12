@@ -24,7 +24,7 @@ main.py
 ```
 src/
 ├── main.py              → orchestratore (chiama gli altri moduli)
-├── models.py            → cosa sono i dati (Decision, Verdict, Severity)
+├── models.py            → cosa sono i dati (Decision, Finding, ToolResult, enums)
 ├── github_context.py    → da dove vengono i dati (ambiente GH Actions)
 └── decision_engine.py   → la logica (come si decide)
 ```
@@ -37,7 +37,7 @@ La regola d'oro e': **ogni modulo ha UN motivo per cambiare**.
 
 - `models.py` cambia se aggiungiamo campi alla Decision (es. findings, tool_results)
 - `github_context.py` cambia se leggiamo nuove variabili d'ambiente
-- `decision_engine.py` cambia se cambia la logica decisionale (Step 3: da regole → AI)
+- `decision_engine.py` cambia se cambia la logica decisionale (da regole semplici a pipeline multi-agent)
 - `main.py` cambia solo se cambia il flusso generale
 
 Quando allo Step 3 integriamo smolagents, toccheremo solo `decision_engine.py`.
@@ -67,8 +67,11 @@ class Decision:
     continue_pipeline: bool
     max_severity: Severity
     selected_tools: list[str]
+    findings_count: int
     reason: str
     mode: str
+    analysis_report: str
+    safety_warnings: list[dict]
     timestamp: str
 ```
 
@@ -116,7 +119,7 @@ Il campo `timestamp` ha un valore di default generato al momento della creazione
 - `to_json()` → stringa JSON (per artifact)
 - `to_outputs()` → dizionario stringa→stringa (per GITHUB_OUTPUT)
 
-Il campo `version: "1.0"` in `to_dict()` serve per la forward compatibility:
+Il campo `version` in `to_dict()` serve per la forward compatibility:
 se in futuro cambiamo la struttura del JSON, chi lo legge puo' controllare la versione.
 
 ---
@@ -169,20 +172,16 @@ UNA volta e lo mettiamo in un oggetto pulito. Vantaggi:
 ```python
 class DecisionEngine:
     def decide(self, ctx: GitHubContext) -> Decision:
-        if ctx.mode == "shadow":
-            return Decision(verdict=Verdict.ALLOWED, ...)
-        else:
-            return Decision(verdict=Verdict.MANUAL_REVIEW, ...)
+        triage = self._run_triage(ctx)
+        tool_results, analysis = self._run_analyzer(ctx, triage)
+        return self._apply_gate(ctx, triage, tool_results, analysis)
 ```
 
-Questo e' il modulo piu' semplice ora, ma diventa il piu' importante allo Step 3.
+Questo e' il modulo piu' importante: orchestra triage, analyzer e gate deterministico.
 Il contratto e': **prende un contesto, ritorna una decisione**. Come ci arriva
 e' un dettaglio interno.
 
-Step 2: `if mode == "shadow" → allowed`
-Step 3: `smolagents_agent.run("analizza questa PR") → Decision`
-
-La firma `decide(ctx) -> Decision` non cambia.
+La firma `decide(ctx) -> Decision` resta stabile anche mentre la logica evolve.
 
 ---
 
@@ -281,10 +280,11 @@ il codice e' pronto per evolversi.
 
 ---
 
-## Cosa viene dopo (Step 3)
+## Cosa viene dopo (dallo stato attuale)
 
-`DecisionEngine.decide()` chiamera' smolagents invece di fare if/else.
-I modelli dati (`Decision`, `Verdict`, `Severity`) restano identici.
-`main.py` non cambia. Solo `decision_engine.py` viene riscritto.
+La separazione in moduli continua a pagare:
+- puoi aggiungere nuovi scanner in `tools.py`
+- puoi evolvere policy nel gate senza toccare il runtime
+- puoi migliorare reporting PR senza riscrivere i modelli base
 
-Questo e' il valore della separazione: cambi UN modulo, il resto funziona.
+Questo e' il valore della separazione: cambi un blocco, il resto regge.
