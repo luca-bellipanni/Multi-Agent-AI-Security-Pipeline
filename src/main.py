@@ -2,13 +2,19 @@
 
 import os
 import sys
+import uuid
 
 from src.github_context import GitHubContext
 from src.decision_engine import DecisionEngine
 
 
 def write_outputs(outputs: dict[str, str]) -> None:
-    """Write key=value pairs to GITHUB_OUTPUT."""
+    """Write outputs to GITHUB_OUTPUT using multiline-safe delimiters.
+
+    Uses the heredoc-style delimiter format to prevent injection via
+    newlines in AI-generated values (e.g. the 'reason' field).
+    See: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strings
+    """
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:
         print("--- Outputs (no GITHUB_OUTPUT file) ---")
@@ -18,7 +24,8 @@ def write_outputs(outputs: dict[str, str]) -> None:
 
     with open(output_path, "a") as f:
         for key, value in outputs.items():
-            f.write(f"{key}={value}\n")
+            delimiter = f"ghadelimiter_{uuid.uuid4().hex}"
+            f.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
             print(f"  Output: {key}={value}")
 
 

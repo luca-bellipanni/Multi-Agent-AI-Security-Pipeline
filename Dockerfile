@@ -9,6 +9,10 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY entrypoint.sh /app/entrypoint.sh
 COPY src/ /app/src/
 
-RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh \
+    && useradd --create-home --shell /bin/bash appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
 
 ENTRYPOINT ["/app/entrypoint.sh"]
