@@ -105,6 +105,50 @@ def _get_language(filename: str) -> str:
     return "unknown"
 
 
+def _fetch_pr_files_from_api(
+    github_token: str, repository: str, pr_number: int,
+) -> tuple[list[dict], str | None]:
+    """Fetch PR files from GitHub API (paginated, max 300).
+
+    Returns (files_list, error_or_None).
+    Shared between FetchPRFilesTool and FetchPRDiffTool.
+    """
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    all_files: list[dict] = []
+    for page in range(1, 4):  # max 3 pages
+        url = f"https://api.github.com/repos/{repository}/pulls/{pr_number}/files"
+        try:
+            resp = requests.get(
+                url,
+                headers=headers,
+                params={"per_page": 100, "page": page},
+                timeout=10,
+            )
+        except requests.RequestException as e:
+            return [], f"Error: GitHub API request failed: {e}"
+
+        if resp.status_code == 404:
+            return [], f"Error: PR #{pr_number} not found in {repository}."
+        if resp.status_code == 403:
+            return [], "Error: GitHub API rate limit or permission denied."
+        if resp.status_code != 200:
+            return [], f"Error: GitHub API returned status {resp.status_code}."
+
+        batch = resp.json()
+        if not batch:
+            break
+        all_files.extend(batch)
+        if len(batch) < 100:
+            break
+
+    return all_files, None
+
+
 def _format_pr_files(pr_number: int, title: str, files: list[dict]) -> str:
     """Format GitHub API file list into a human-readable summary."""
     if not files:
@@ -194,15 +238,14 @@ class FetchPRFilesTool(Tool):
         if not self.repository:
             return "Error: No repository configured. Cannot fetch PR files."
 
-        headers = {
-            "Authorization": f"token {self.github_token}",
-            "Accept": "application/vnd.github.v3+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-
         # Fetch PR title (best-effort)
         title = "(unknown)"
         try:
+            headers = {
+                "Authorization": f"token {self.github_token}",
+                "Accept": "application/vnd.github.v3+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
             pr_url = f"https://api.github.com/repos/{self.repository}/pulls/{pr_number}"
             pr_resp = requests.get(pr_url, headers=headers, timeout=10)
             if pr_resp.status_code == 200:
@@ -210,35 +253,145 @@ class FetchPRFilesTool(Tool):
         except Exception:
             pass
 
-        # Fetch files (paginated, up to 300 files)
-        all_files: list[dict] = []
-        for page in range(1, 4):  # max 3 pages
-            url = f"https://api.github.com/repos/{self.repository}/pulls/{pr_number}/files"
-            try:
-                resp = requests.get(
-                    url,
-                    headers=headers,
-                    params={"per_page": 100, "page": page},
-                    timeout=10,
-                )
-            except requests.RequestException as e:
-                return f"Error: GitHub API request failed: {e}"
-
-            if resp.status_code == 404:
-                return f"Error: PR #{pr_number} not found in {self.repository}."
-            if resp.status_code == 403:
-                return "Error: GitHub API rate limit or permission denied."
-            if resp.status_code != 200:
-                return f"Error: GitHub API returned status {resp.status_code}."
-
-            batch = resp.json()
-            if not batch:
-                break
-            all_files.extend(batch)
-            if len(batch) < 100:
-                break
+        # Fetch files using shared helper
+        all_files, error = _fetch_pr_files_from_api(
+            self.github_token, self.repository, pr_number,
+        )
+        if error:
+            return error
 
         return _format_pr_files(pr_number, title, all_files)
+
+
+# --- Diff tool ---
+
+# Size limits for diff output (prevent LLM context overflow)
+MAX_PATCH_CHARS_PER_FILE = 10_000
+MAX_TOTAL_PATCH_CHARS = 50_000
+
+
+class FetchPRDiffTool(Tool):
+    """Fetches code diffs for files changed in a GitHub pull request.
+
+    Returns actual unified diffs (patches) so the agent can see what
+    code changed, not just file names. This enables the OODA loop:
+    the agent observes the diff before deciding what to scan.
+
+    Security (llm-security/excessive-agency — LLM06):
+    - PR number injected via constructor, agent cannot access other PRs.
+    - File paths only filter API response, no filesystem access.
+    - Output size limited to prevent context overflow.
+
+    Security (llm-security/prompt-injection — LLM01):
+    - Diff content is UNTRUSTED (attacker-controlled code).
+    - The agent's system prompt warns about this.
+    """
+
+    name = "fetch_pr_diff"
+    description = (
+        "Fetches the actual code diff (patches) for files changed in the PR. "
+        "Returns unified diff format showing exactly what lines were added, "
+        "modified, or deleted. Use this to understand what code actually changed "
+        "before deciding which security scans to run."
+    )
+    inputs = {
+        "file_paths": {
+            "type": "string",
+            "description": (
+                "Comma-separated file paths to get diffs for, "
+                "or 'all' to get all file diffs."
+            ),
+        }
+    }
+    output_type = "string"
+
+    def __init__(
+        self,
+        github_token: str,
+        repository: str,
+        pr_number: int,
+        **kwargs,
+    ):
+        self.github_token = github_token
+        self.repository = repository
+        self.pr_number = pr_number
+        self._files_cache: list[dict] | None = None
+        super().__init__(**kwargs)
+
+    def _fetch_files(self) -> tuple[list[dict], str | None]:
+        """Fetch PR files from GitHub API (cached after first call)."""
+        if self._files_cache is not None:
+            return self._files_cache, None
+
+        if not self.github_token:
+            return [], "Error: No GitHub token available. Cannot fetch PR diff."
+        if not self.repository:
+            return [], "Error: No repository configured. Cannot fetch PR diff."
+
+        files, error = _fetch_pr_files_from_api(
+            self.github_token, self.repository, self.pr_number,
+        )
+        if error:
+            return [], error
+
+        self._files_cache = files
+        return files, None
+
+    def forward(self, file_paths: str) -> str:
+        """Return formatted diffs for requested files."""
+        files, error = self._fetch_files()
+        if error:
+            return error
+
+        # Parse requested file paths
+        requested = {p.strip() for p in file_paths.split(",") if p.strip()}
+        fetch_all = "all" in requested
+
+        if fetch_all:
+            selected = files
+        else:
+            selected = [f for f in files if f.get("filename") in requested]
+
+        if not selected:
+            if fetch_all:
+                return "No diffs available for this PR."
+            return f"No diffs found for: {', '.join(sorted(requested))}"
+
+        # Format with size limits
+        parts: list[str] = []
+        total_chars = 0
+
+        for f in selected:
+            patch = f.get("patch", "")
+            if not patch:
+                continue
+
+            filename = f.get("filename", "unknown")
+            status = f.get("status", "unknown")
+            additions = f.get("additions", 0)
+            deletions = f.get("deletions", 0)
+
+            # Per-file truncation
+            if len(patch) > MAX_PATCH_CHARS_PER_FILE:
+                patch = patch[:MAX_PATCH_CHARS_PER_FILE] + "\n... [truncated]"
+
+            header = f"=== {filename} ({status}, +{additions} -{deletions}) ==="
+            section = f"{header}\n{patch}\n"
+
+            # Total size limit
+            if total_chars + len(section) > MAX_TOTAL_PATCH_CHARS:
+                parts.append("... [remaining files truncated for size]")
+                break
+
+            parts.append(section)
+            total_chars += len(section)
+
+        if not parts:
+            if fetch_all:
+                return "No diffs available (files may be binary or too large)."
+            return f"No diffs available for: {', '.join(sorted(requested))}"
+
+        return "\n".join(parts)
 
 
 # --- Semgrep constants ---
@@ -361,9 +514,13 @@ class SemgrepTool(Tool):
         self.workspace_path = workspace_path
         self.timeout = timeout
         # Side channel for the gate (LLM05: raw findings independent of agent)
+        # Per-call (reset each forward()):
         self._last_raw_findings: list[Finding] = []
         self._last_config_used: list[str] = []
         self._last_error: str = ""
+        # Cumulative across all calls (OODA: agent may call multiple times):
+        self._all_raw_findings: list[Finding] = []
+        self._all_configs_used: list[str] = []
         super().__init__(**kwargs)
 
     def forward(self, config: str) -> str:
@@ -383,6 +540,7 @@ class SemgrepTool(Tool):
             return val_error
 
         self._last_config_used = rulesets
+        self._all_configs_used.extend(rulesets)
 
         raw_json, error = self._execute(config)
         if error:
@@ -391,6 +549,7 @@ class SemgrepTool(Tool):
 
         # Side channel: save raw findings before returning to the agent
         self._last_raw_findings = parse_semgrep_findings(raw_json)
+        self._all_raw_findings.extend(self._last_raw_findings)
         return _format_semgrep_findings(raw_json)
 
     def run_and_parse(self, config: str) -> tuple[str, list[Finding]]:

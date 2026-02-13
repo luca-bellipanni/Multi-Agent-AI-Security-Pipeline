@@ -737,3 +737,62 @@ class TestAnalyzerIntegration:
         ctx = _make_context(mode="shadow")
         decision = engine.decide(ctx)
         assert decision.verdict == Verdict.ALLOWED
+
+
+# --- Cumulative findings (OODA multi-call) ---
+
+class TestCumulativeFindings:
+    """Test that the gate sees findings from ALL semgrep calls.
+
+    When the AppSec Agent calls run_semgrep multiple times (OODA
+    escalation), the cumulative side channel captures all findings.
+    """
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.run_triage", return_value=_make_triage())
+    @patch("src.agent.create_triage_agent")
+    def test_gate_sees_all_findings_from_multiple_scans(
+        self, mock_create_triage, mock_run_triage,
+    ):
+        """Simulate two semgrep calls: gate sees combined findings."""
+        engine = DecisionEngine()
+        combined_findings = [
+            _make_finding(Severity.HIGH, rule_id="scan1.rule"),
+            _make_finding(Severity.MEDIUM, rule_id="scan2.rule"),
+        ]
+        tr = _make_tool_result(
+            combined_findings,
+            config_used=["p/python", "p/owasp-top-ten"],
+        )
+        engine._run_analyzer = MagicMock(
+            return_value=([tr], _empty_analysis()),
+        )
+
+        ctx = _make_context(mode="enforce")
+        decision = engine.decide(ctx)
+        assert decision.findings_count == 2
+        assert decision.verdict == Verdict.MANUAL_REVIEW
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.run_triage", return_value=_make_triage())
+    @patch("src.agent.create_triage_agent")
+    def test_all_configs_in_tool_result(
+        self, mock_create_triage, mock_run_triage,
+    ):
+        """Config from multiple scans is accumulated in tool result."""
+        engine = DecisionEngine()
+        tr = _make_tool_result(
+            [],
+            config_used=["p/security-audit", "p/python", "p/owasp-top-ten"],
+        )
+        engine._run_analyzer = MagicMock(
+            return_value=([tr], _empty_analysis()),
+        )
+
+        ctx = _make_context(mode="enforce")
+        decision = engine.decide(ctx)
+        assert decision.verdict == Verdict.ALLOWED
+        configs = decision.tool_results[0].config_used
+        assert "p/security-audit" in configs
+        assert "p/python" in configs
+        assert "p/owasp-top-ten" in configs

@@ -288,10 +288,10 @@ class TestCreateAnalyzerAgent:
 
     @patch("src.analyzer_agent.LiteLLMModel")
     @patch("src.analyzer_agent.CodeAgent")
-    def test_max_steps_is_five(self, mock_agent, mock_model):
+    def test_max_steps_is_ten(self, mock_agent, mock_model):
         create_analyzer_agent("key", "model-id")
         call_kwargs = mock_agent.call_args
-        assert call_kwargs.kwargs.get("max_steps") == 5
+        assert call_kwargs.kwargs.get("max_steps") == 10
 
     @patch("src.analyzer_agent.LiteLLMModel")
     @patch("src.analyzer_agent.CodeAgent")
@@ -334,6 +334,40 @@ class TestAnalyzerSystemPromptSecurity:
 
     def test_prompt_mentions_security_audit(self):
         assert "p/security-audit" in ANALYZER_SYSTEM_PROMPT
+
+
+# ── OODA prompt checks ──────────────────────────────────────────────
+
+
+class TestAnalyzerOODAPrompt:
+    """Verify the system prompt guides the OODA loop."""
+
+    def test_prompt_has_observe_step(self):
+        assert "OBSERVE" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_has_reflect_step(self):
+        assert "REFLECT" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_has_escalate_step(self):
+        assert "ESCALATE" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_warns_diff_untrusted(self):
+        assert "diff" in ANALYZER_SYSTEM_PROMPT.lower()
+        assert "UNTRUSTED" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_mentions_fetch_pr_diff(self):
+        assert "fetch_pr_diff" in ANALYZER_SYSTEM_PROMPT
+
+
+class TestBuildAnalyzerTaskOODA:
+
+    def test_mentions_observing_code(self):
+        task = build_analyzer_task(_make_triage())
+        assert "observ" in task.lower()
+
+    def test_mentions_fetch_pr_diff(self):
+        task = build_analyzer_task(_make_triage())
+        assert "fetch_pr_diff" in task
 
 
 # ── run_analyzer ─────────────────────────────────────────────────────

@@ -7,15 +7,19 @@ from unittest.mock import patch, MagicMock
 from src.models import Finding, Severity
 from src.tools import (
     FetchPRFilesTool,
+    FetchPRDiffTool,
     SemgrepTool,
     _get_language,
     _format_pr_files,
+    _fetch_pr_files_from_api,
     _validate_rulesets,
     _format_semgrep_findings,
     parse_semgrep_findings,
     DEPENDENCY_FILES,
     ALLOWED_RULESET_PREFIXES,
     MAX_RULESETS,
+    MAX_PATCH_CHARS_PER_FILE,
+    MAX_TOTAL_PATCH_CHARS,
 )
 
 
@@ -667,3 +671,343 @@ class TestSemgrepSideChannel:
         assert tool._last_raw_findings == []
         assert tool._last_error == ""
         assert tool._last_config_used == ["p/python"]
+
+
+# --- Semgrep: cumulative side channel (OODA) ---
+
+class TestSemgrepCumulativeSideChannel:
+    """Test the cumulative side channel for multi-call OODA loop.
+
+    When the agent calls run_semgrep multiple times (escalation scans),
+    _all_raw_findings accumulates findings from ALL calls so the gate
+    sees the complete picture.
+    """
+
+    def test_all_findings_initial_empty(self):
+        tool = SemgrepTool(workspace_path="/tmp/test")
+        assert tool._all_raw_findings == []
+        assert tool._all_configs_used == []
+
+    @patch("src.tools.subprocess.run")
+    def test_all_findings_accumulate(self, mock_run):
+        """Findings from multiple forward() calls accumulate."""
+        tool = SemgrepTool(workspace_path="/tmp/test")
+
+        # First call: one finding
+        mock_run.return_value = MagicMock(
+            stdout=_make_semgrep_json([{
+                "rule_id": "first.rule",
+                "severity": "ERROR",
+            }]),
+            stderr="",
+            returncode=0,
+        )
+        tool.forward("p/python")
+        assert len(tool._all_raw_findings) == 1
+
+        # Second call: another finding
+        mock_run.return_value = MagicMock(
+            stdout=_make_semgrep_json([{
+                "rule_id": "second.rule",
+                "severity": "WARNING",
+            }]),
+            stderr="",
+            returncode=0,
+        )
+        tool.forward("p/owasp-top-ten")
+        assert len(tool._all_raw_findings) == 2
+        assert tool._all_raw_findings[0].rule_id == "first.rule"
+        assert tool._all_raw_findings[1].rule_id == "second.rule"
+
+    @patch("src.tools.subprocess.run")
+    def test_all_configs_accumulate(self, mock_run):
+        """Configs from multiple forward() calls accumulate."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp/test")
+
+        tool.forward("p/python")
+        tool.forward("p/owasp-top-ten")
+
+        assert tool._all_configs_used == ["p/python", "p/owasp-top-ten"]
+
+    @patch("src.tools.subprocess.run")
+    def test_last_vs_all_independent(self, mock_run):
+        """_last resets per call, _all accumulates."""
+        tool = SemgrepTool(workspace_path="/tmp/test")
+
+        # First call with finding
+        mock_run.return_value = MagicMock(
+            stdout=_make_semgrep_json([{"rule_id": "a.rule", "severity": "ERROR"}]),
+            stderr="",
+            returncode=0,
+        )
+        tool.forward("p/python")
+
+        # Second call clean
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="",
+            returncode=0,
+        )
+        tool.forward("p/java")
+
+        # _last shows only last call
+        assert tool._last_raw_findings == []
+        assert tool._last_config_used == ["p/java"]
+        # _all shows everything
+        assert len(tool._all_raw_findings) == 1
+        assert tool._all_configs_used == ["p/python", "p/java"]
+
+    @patch("src.tools.subprocess.run")
+    def test_all_findings_on_error(self, mock_run):
+        """Error on second call doesn't corrupt accumulated findings."""
+        tool = SemgrepTool(workspace_path="/tmp/test")
+
+        # First call succeeds
+        mock_run.return_value = MagicMock(
+            stdout=_make_semgrep_json([{"rule_id": "ok.rule", "severity": "ERROR"}]),
+            stderr="",
+            returncode=0,
+        )
+        tool.forward("p/python")
+        assert len(tool._all_raw_findings) == 1
+
+        # Second call fails
+        mock_run.return_value = MagicMock(stdout="", stderr="crash", returncode=2)
+        tool.forward("p/java")
+
+        # Accumulated findings preserved
+        assert len(tool._all_raw_findings) == 1
+        assert tool._all_raw_findings[0].rule_id == "ok.rule"
+        # Config still accumulated (we tried p/java)
+        assert tool._all_configs_used == ["p/python", "p/java"]
+
+
+# --- FetchPRDiffTool ---
+
+def _make_gh_file_with_patch(
+    filename, status="modified", additions=10, deletions=2, patch="",
+):
+    """Create a mock GitHub API file object with patch."""
+    return {
+        "sha": "abc123",
+        "filename": filename,
+        "status": status,
+        "additions": additions,
+        "deletions": deletions,
+        "changes": additions + deletions,
+        "patch": patch,
+    }
+
+
+class TestFetchPRDiffTool:
+    """Test the diff observation tool for the OODA loop.
+
+    Security (LLM06 — excessive agency):
+    PR number is injected via constructor, never exposed to the LLM.
+    File paths only filter API response, no filesystem access.
+    """
+
+    def test_tool_attributes(self):
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        assert tool.name == "fetch_pr_diff"
+        assert tool.output_type == "string"
+        assert "file_paths" in tool.inputs
+
+    def test_pr_number_not_in_inputs(self):
+        """PR number must NOT be LLM-visible (LLM06)."""
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        assert "pr_number" not in tool.inputs
+
+    def test_no_token_error(self):
+        tool = FetchPRDiffTool(
+            github_token="", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("all")
+        assert "Error" in result
+        assert "token" in result.lower()
+
+    def test_no_repository_error(self):
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="", pr_number=42,
+        )
+        result = tool.forward("all")
+        assert "Error" in result
+        assert "repository" in result.lower()
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_all_files_returns_patches(self, mock_api):
+        mock_api.return_value = (
+            [
+                _make_gh_file_with_patch(
+                    "src/auth.py", patch="@@ -1 +1 @@\n-old\n+new",
+                ),
+                _make_gh_file_with_patch(
+                    "src/login.py", patch="@@ -5 +5 @@\n+import os",
+                ),
+            ],
+            None,
+        )
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("all")
+
+        assert "src/auth.py" in result
+        assert "src/login.py" in result
+        assert "-old" in result
+        assert "+new" in result
+        assert "+import os" in result
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_specific_file_returns_patch(self, mock_api):
+        mock_api.return_value = (
+            [
+                _make_gh_file_with_patch("src/auth.py", patch="patch_a"),
+                _make_gh_file_with_patch("src/login.py", patch="patch_b"),
+            ],
+            None,
+        )
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("src/auth.py")
+
+        assert "src/auth.py" in result
+        assert "patch_a" in result
+        assert "src/login.py" not in result
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_file_not_found_returns_message(self, mock_api):
+        mock_api.return_value = (
+            [_make_gh_file_with_patch("src/auth.py", patch="p")],
+            None,
+        )
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("nonexistent.py")
+        assert "No diffs found" in result
+        assert "nonexistent.py" in result
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_binary_file_no_patch_skipped(self, mock_api):
+        """Files without a patch field (binary files) are skipped."""
+        mock_api.return_value = (
+            [
+                _make_gh_file_with_patch("image.png", patch=""),
+                _make_gh_file_with_patch("src/app.py", patch="real patch"),
+            ],
+            None,
+        )
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("all")
+        assert "image.png" not in result
+        assert "real patch" in result
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_per_file_truncation(self, mock_api):
+        big_patch = "x" * (MAX_PATCH_CHARS_PER_FILE + 1000)
+        mock_api.return_value = (
+            [_make_gh_file_with_patch("big.py", patch=big_patch)],
+            None,
+        )
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("all")
+        assert "[truncated]" in result
+        assert len(result) < len(big_patch)
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_total_truncation(self, mock_api):
+        """When total output exceeds limit, remaining files are skipped."""
+        # Each file has a patch close to per-file limit
+        patch = "y" * (MAX_PATCH_CHARS_PER_FILE - 100)
+        files = [
+            _make_gh_file_with_patch(f"file{i}.py", patch=patch)
+            for i in range(20)  # 20 files * ~10K = ~200K > 50K limit
+        ]
+        mock_api.return_value = (files, None)
+
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("all")
+        assert "remaining files truncated" in result
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_api_called_once_cached(self, mock_api):
+        """API is called only once, subsequent calls use cache."""
+        mock_api.return_value = (
+            [_make_gh_file_with_patch("a.py", patch="p")],
+            None,
+        )
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        tool.forward("all")
+        tool.forward("a.py")
+
+        mock_api.assert_called_once()
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_api_404_error(self, mock_api):
+        mock_api.return_value = ([], "Error: PR #99 not found in o/r.")
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=99,
+        )
+        result = tool.forward("all")
+        assert "Error" in result
+        assert "not found" in result
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_api_403_error(self, mock_api):
+        mock_api.return_value = (
+            [],
+            "Error: GitHub API rate limit or permission denied.",
+        )
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("all")
+        assert "Error" in result
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_all_binary_files_message(self, mock_api):
+        """When all files lack patches (all binary), return clear message."""
+        mock_api.return_value = (
+            [_make_gh_file_with_patch("a.bin", patch="")],
+            None,
+        )
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("all")
+        assert "binary" in result.lower() or "No diffs" in result
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_output_includes_status(self, mock_api):
+        mock_api.return_value = (
+            [_make_gh_file_with_patch(
+                "new.py", status="added", additions=5, deletions=0,
+                patch="+new code",
+            )],
+            None,
+        )
+        tool = FetchPRDiffTool(
+            github_token="tok", repository="o/r", pr_number=42,
+        )
+        result = tool.forward("all")
+        assert "added" in result
+        assert "+5" in result

@@ -1,16 +1,17 @@
 """
-Decision engine — orchestrates multi-agent pipeline + deterministic gate.
+Decision engine — orchestrates multi-agent OODA pipeline + deterministic gate.
 
 Architecture:
   1. Triage Agent (AI) → provides context about PR changes
-  2. AppSec Agent (AI) → decides rulesets, runs tools, analyzes findings
+  2. AppSec Agent (AI, OODA loop) → observes diff, decides rulesets, runs
+     tools (possibly multiple times), analyzes findings in context
   3. Gate (Python code, not hackable) → final verdict
 
 Security (llm-security/output-handling — LLM05):
-  The gate uses RAW findings from the tool's side channel for its verdict,
-  NOT the agent's classifications. The agent's analysis is included in the
-  report for human reviewers (the VALUE), but raw findings drive the
-  verdict (the SAFETY NET).
+  The gate uses RAW findings from the tool's CUMULATIVE side channel for
+  its verdict, NOT the agent's classifications. The cumulative channel
+  captures findings from ALL tool calls (the agent may run semgrep
+  multiple times during its OODA loop).
 
   The safety net compares raw findings against agent claims: if the agent
   dismissed HIGH/CRITICAL findings, the gate flags this as a warning.
@@ -102,14 +103,16 @@ class DecisionEngine:
     def _run_analyzer(
         self, ctx: GitHubContext, triage: dict,
     ) -> tuple[list[ToolResult], dict]:
-        """Run the AppSec Agent and return (raw_tool_results, agent_analysis).
+        """Run the AppSec Agent (OODA loop) and return (raw_tool_results, agent_analysis).
 
         Security (LLM05 — untrusted output handling):
-        Raw findings come from the tool's side channel, NOT from the agent.
-        The agent's analysis is returned separately for the gate to compare.
+        Raw findings come from the tool's CUMULATIVE side channel, NOT
+        from the agent. The cumulative channel captures findings from ALL
+        tool calls (the agent may call run_semgrep multiple times).
 
         Security (LLM06 — excessive agency):
         SemgrepTool has built-in guardrails (allowlist, workspace, timeout).
+        FetchPRDiffTool has PR number injected and output size limits.
         """
         api_key = os.environ.get("INPUT_AI_API_KEY", "")
         model_id = os.environ.get("INPUT_AI_MODEL", "gpt-4o-mini")
@@ -125,22 +128,32 @@ class DecisionEngine:
 
         try:
             from src.analyzer_agent import create_analyzer_agent, run_analyzer
-            from src.tools import SemgrepTool
+            from src.tools import FetchPRDiffTool, SemgrepTool
 
-            print("Running AppSec Agent...")
+            print("Running AppSec Agent (OODA loop)...")
 
-            # Create tool — we keep the reference for the side channel
+            # Create tools — we keep semgrep_tool ref for the side channel
             semgrep_tool = SemgrepTool(workspace_path=ctx.workspace)
+            tools = [semgrep_tool]
+
+            # Observe tool: only if PR context available (LLM06)
+            if ctx.token and ctx.repository and ctx.pr_number:
+                diff_tool = FetchPRDiffTool(
+                    github_token=ctx.token,
+                    repository=ctx.repository,
+                    pr_number=ctx.pr_number,
+                )
+                tools.append(diff_tool)
 
             agent = create_analyzer_agent(
-                api_key, model_id, tools=[semgrep_tool],
+                api_key, model_id, tools=tools,
             )
             analysis = run_analyzer(agent, triage)
             print(f"AppSec Agent complete: {analysis.get('summary', 'N/A')}")
 
-            # SIDE CHANNEL: read raw findings from the tool, not the agent
-            raw_findings = semgrep_tool._last_raw_findings
-            config_used = semgrep_tool._last_config_used
+            # CUMULATIVE SIDE CHANNEL: read ALL findings from ALL tool calls
+            raw_findings = semgrep_tool._all_raw_findings
+            config_used = semgrep_tool._all_configs_used
             tool_error = semgrep_tool._last_error
 
             tool_success = len(raw_findings) > 0 or (not tool_error)
