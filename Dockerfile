@@ -17,5 +17,6 @@ RUN chmod +x /app/entrypoint.sh \
     && chown -R appuser:appuser /app
 
 USER appuser
+ENV HOME=/home/appuser
 
 ENTRYPOINT ["/app/entrypoint.sh"]
