@@ -52,6 +52,7 @@ class Decision:
     reason: str
     mode: str
     findings_count: int = 0
+    excepted_count: int = 0
     tool_results: list[ToolResult] = field(default_factory=list)
     analysis_report: str = ""
     safety_warnings: list[dict] = field(default_factory=list)
@@ -67,6 +68,7 @@ class Decision:
             "max_severity": self.max_severity.value,
             "selected_tools": self.selected_tools,
             "findings_count": self.findings_count,
+            "excepted_count": self.excepted_count,
             "reason": self.reason,
             "mode": self.mode,
             "analysis_report": self.analysis_report,
@@ -85,4 +87,5 @@ class Decision:
             "findings_count": str(self.findings_count),
             "reason": self.reason,
             "safety_warnings_count": str(len(self.safety_warnings)),
+            "excepted_count": str(self.excepted_count),
         }

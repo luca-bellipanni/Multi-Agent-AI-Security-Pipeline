@@ -47,6 +47,12 @@ def main() -> int:
     if decision.analysis_report:
         print(f"\n{decision.analysis_report}")
 
+    # Save exception memory (auto-exceptions for next run)
+    try:
+        engine.save_memory()
+    except OSError as e:
+        print(f"::warning::Could not save exception memory: {e}")
+
     write_outputs(decision.to_outputs())
 
     if not decision.continue_pipeline:

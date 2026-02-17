@@ -1,7 +1,9 @@
 """Tests for the decision engine.
 
-Tests the deterministic gate, safety net, and analysis report builder.
-The gate uses RAW findings from tool side channel (LLM05), not agent claims.
+Tests the smart gate, safety net, and analysis report builder.
+The gate uses CONFIRMED findings (validated against raw) for its verdict.
+Safety net catches dismissed/unaccounted HIGH/CRITICAL findings.
+Fallback to raw findings when agent hasn't analyzed (fail-secure).
 """
 
 import json
@@ -433,11 +435,17 @@ class TestSafetyNet:
 # --- Gate uses RAW findings (LLM05) ---
 
 class TestGateUsesRawFindings:
-    """Verify the gate uses raw findings from tool side channel,
-    not the agent's confirmed/dismissed lists."""
+    """Verify the gate validates confirmed against raw findings,
+    uses safety net to catch dismissed HIGH/CRITICAL, and prevents
+    hallucinated findings from driving the verdict."""
 
-    def test_agent_dismisses_all_but_gate_blocks(self):
-        """Agent says 'all dismissed', but raw findings have CRITICAL → BLOCKED."""
+    def test_agent_dismisses_critical_safety_net_fires(self):
+        """Agent dismisses CRITICAL → safety net fires → MANUAL_REVIEW.
+
+        The safety net catches the dismissal and forces human review.
+        The gate does NOT auto-block because the agent might be correct
+        (e.g. test file), but requires a human to verify.
+        """
         engine = DecisionEngine()
         raw = [_make_finding(Severity.CRITICAL, rule_id="critical.vuln")]
         analysis = {
@@ -450,8 +458,8 @@ class TestGateUsesRawFindings:
         d = engine._apply_gate(
             _make_context(mode="enforce"), _make_triage(), [tr], analysis,
         )
-        assert d.verdict == Verdict.BLOCKED
-        assert d.findings_count == 1
+        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert len(d.safety_warnings) == 1
 
     def test_agent_confirms_all_gate_agrees(self):
         """Agent confirms findings, gate also sees them → consistent."""
@@ -482,6 +490,291 @@ class TestGateUsesRawFindings:
             _make_context(mode="enforce"), _make_triage(), [tr], analysis,
         )
         assert d.verdict == Verdict.ALLOWED
+
+    def test_agent_confirms_critical_gate_blocks(self):
+        """Agent confirms CRITICAL → gate BLOCKS (confirmed drives verdict)."""
+        engine = DecisionEngine()
+        raw = [_make_finding(Severity.CRITICAL, rule_id="crit.vuln")]
+        analysis = {
+            "confirmed": [{"rule_id": "crit.vuln", "severity": "CRITICAL"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+        }
+        tr = _make_tool_result(raw)
+        d = engine._apply_gate(
+            _make_context(mode="enforce"), _make_triage(), [tr], analysis,
+        )
+        assert d.verdict == Verdict.BLOCKED
+        assert d.findings_count == 1
+
+
+# --- Smart Gate: confirmed-based verdicts ---
+
+class TestSmartGateConfirmedBased:
+    """Test the smart gate that uses agent-confirmed findings for verdicts.
+
+    The gate validates confirmed findings against raw (anti-hallucination),
+    uses raw severity (anti-manipulation), and falls back to raw when
+    the agent hasn't analyzed (fail-secure).
+    """
+
+    def _gate(self, findings, analysis, mode="enforce"):
+        engine = DecisionEngine()
+        tr = _make_tool_result(findings)
+        return engine._apply_gate(
+            _make_context(mode=mode), _make_triage(), [tr], analysis,
+        )
+
+    # -- Confirmed drives verdict --
+
+    def test_confirmed_critical_blocks(self):
+        """Confirmed CRITICAL → BLOCKED."""
+        raw = [_make_finding(Severity.CRITICAL, rule_id="sqli.critical")]
+        analysis = {
+            "confirmed": [{"rule_id": "sqli.critical", "severity": "CRITICAL"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.BLOCKED
+        assert d.findings_count == 1
+
+    def test_confirmed_high_manual_review(self):
+        """Confirmed HIGH → MANUAL_REVIEW."""
+        raw = [_make_finding(Severity.HIGH, rule_id="xss.rule")]
+        analysis = {
+            "confirmed": [{"rule_id": "xss.rule", "severity": "HIGH"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert d.findings_count == 1
+
+    def test_confirmed_medium_manual_review(self):
+        """Confirmed MEDIUM → MANUAL_REVIEW."""
+        raw = [_make_finding(Severity.MEDIUM, rule_id="info.leak")]
+        analysis = {
+            "confirmed": [{"rule_id": "info.leak", "severity": "MEDIUM"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.MANUAL_REVIEW
+
+    def test_no_confirmed_allows(self):
+        """Agent dismissed all (none HIGH/CRIT) → ALLOWED.
+
+        This is the key noise-filtering scenario: 10 raw findings,
+        agent dismissed all as false positives in test files, gate ALLOWS.
+        """
+        raw = [
+            _make_finding(Severity.LOW, rule_id=f"noise.{i}")
+            for i in range(10)
+        ]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [
+                {"rule_id": f"noise.{i}", "reason": "test file"}
+                for i in range(10)
+            ],
+            "findings_analyzed": 10,
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.ALLOWED
+        assert d.findings_count == 0
+
+    # -- Noise filtering --
+
+    def test_raw_low_dismissed_by_agent_allows(self):
+        """10 raw LOW findings, agent dismisses all → ALLOWED."""
+        raw = [_make_finding(Severity.LOW, rule_id=f"low.{i}") for i in range(10)]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [
+                {"rule_id": f"low.{i}", "reason": "noise"} for i in range(10)
+            ],
+            "findings_analyzed": 10,
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.ALLOWED
+        assert d.findings_count == 0
+
+    def test_mixed_raw_only_confirmed_count(self):
+        """47 raw, 3 confirmed → findings_count=3, MANUAL_REVIEW."""
+        raw = (
+            [_make_finding(Severity.HIGH, rule_id=f"real.{i}") for i in range(3)]
+            + [_make_finding(Severity.LOW, rule_id=f"noise.{i}") for i in range(44)]
+        )
+        analysis = {
+            "confirmed": [
+                {"rule_id": f"real.{i}", "severity": "HIGH"} for i in range(3)
+            ],
+            "dismissed": [
+                {"rule_id": f"noise.{i}", "reason": "fp"} for i in range(44)
+            ],
+            "findings_analyzed": 47,
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert d.findings_count == 3
+
+    # -- Anti-hallucination --
+
+    def test_hallucinated_confirmed_ignored(self):
+        """Agent hallucinates a CRITICAL not in raw → ignored → ALLOWED."""
+        raw = [_make_finding(Severity.LOW, rule_id="real.low")]
+        analysis = {
+            "confirmed": [{"rule_id": "phantom.critical", "severity": "CRITICAL"}],
+            "dismissed": [{"rule_id": "real.low", "reason": "noise"}],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis)
+        # phantom.critical not in raw → dropped; real.low is LOW dismissed → no safety
+        assert d.verdict == Verdict.ALLOWED
+        assert d.findings_count == 0
+
+    def test_severity_from_raw_not_agent(self):
+        """Agent claims CRITICAL, raw says MEDIUM → verdict uses MEDIUM.
+
+        Anti-severity-manipulation: the gate uses severity from the raw
+        finding, not the agent's classification.
+        """
+        raw = [_make_finding(Severity.MEDIUM, rule_id="sev.test")]
+        analysis = {
+            "confirmed": [{"rule_id": "sev.test", "severity": "CRITICAL"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis)
+        # Confirmed rule exists in raw, but raw severity is MEDIUM → not BLOCKED
+        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert d.max_severity == Severity.MEDIUM
+
+    # -- Fallback: agent hasn't analyzed --
+
+    def test_empty_analysis_falls_back_to_raw(self):
+        """Empty analysis + raw findings → fallback to raw → MANUAL_REVIEW."""
+        raw = [_make_finding(Severity.HIGH, rule_id="raw.high")]
+        d = self._gate(raw, _empty_analysis())
+        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert d.findings_count == 1
+
+    def test_empty_analysis_critical_blocks(self):
+        """Empty analysis + raw CRITICAL → fallback → BLOCKED."""
+        raw = [_make_finding(Severity.CRITICAL, rule_id="raw.crit")]
+        d = self._gate(raw, _empty_analysis())
+        assert d.verdict == Verdict.BLOCKED
+
+    def test_parse_failure_falls_back_to_raw(self):
+        """Unparseable response (empty confirmed/dismissed) → fallback."""
+        raw = [_make_finding(Severity.MEDIUM, rule_id="raw.med")]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [],
+            "findings_analyzed": 0,
+            "summary": "Analyzer response could not be parsed.",
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert d.findings_count == 1  # raw count, not confirmed
+
+    # -- Safety net override --
+
+    def test_safety_net_overrides_to_manual_review(self):
+        """Agent dismisses HIGH → safety net fires → MANUAL_REVIEW."""
+        raw = [_make_finding(Severity.HIGH, rule_id="dismissed.high")]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [{"rule_id": "dismissed.high", "reason": "fp"}],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert len(d.safety_warnings) == 1
+
+    def test_safety_net_beats_clean_confirmed(self):
+        """0 confirmed + safety net fires → MANUAL_REVIEW (not ALLOWED).
+
+        Agent confirms nothing but also dismisses a HIGH finding
+        that exists in raw → safety net catches it.
+        """
+        raw = [
+            _make_finding(Severity.HIGH, rule_id="sneaky.high"),
+            _make_finding(Severity.LOW, rule_id="noise.low"),
+        ]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [
+                {"rule_id": "sneaky.high", "reason": "safe"},
+                {"rule_id": "noise.low", "reason": "noise"},
+            ],
+            "findings_analyzed": 2,
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert len(d.safety_warnings) == 1
+
+    def test_no_safety_no_confirmed_allows(self):
+        """No safety warnings + no confirmed → ALLOWED."""
+        raw = [_make_finding(Severity.LOW, rule_id="safe.low")]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [{"rule_id": "safe.low", "reason": "test file"}],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis)
+        assert d.verdict == Verdict.ALLOWED
+        assert d.findings_count == 0
+        assert len(d.safety_warnings) == 0
+
+    # -- findings_count reflects effective --
+
+    def test_findings_count_is_confirmed_count(self):
+        """findings_count = len(confirmed validated against raw), not raw."""
+        raw = [
+            _make_finding(Severity.HIGH, rule_id="real.1"),
+            _make_finding(Severity.HIGH, rule_id="real.2"),
+            _make_finding(Severity.LOW, rule_id="noise.1"),
+            _make_finding(Severity.LOW, rule_id="noise.2"),
+            _make_finding(Severity.LOW, rule_id="noise.3"),
+        ]
+        analysis = {
+            "confirmed": [
+                {"rule_id": "real.1", "severity": "HIGH"},
+                {"rule_id": "real.2", "severity": "HIGH"},
+            ],
+            "dismissed": [
+                {"rule_id": "noise.1", "reason": "fp"},
+                {"rule_id": "noise.2", "reason": "fp"},
+                {"rule_id": "noise.3", "reason": "fp"},
+            ],
+            "findings_analyzed": 5,
+        }
+        d = self._gate(raw, analysis)
+        assert d.findings_count == 2  # Only the 2 confirmed
+
+    def test_findings_count_is_raw_in_fallback(self):
+        """In fallback mode (no analysis), findings_count = raw count."""
+        raw = [_make_finding(Severity.MEDIUM, rule_id=f"r.{i}") for i in range(5)]
+        d = self._gate(raw, _empty_analysis())
+        assert d.findings_count == 5
+
+    # -- Report includes effective findings --
+
+    def test_report_includes_effective_count(self):
+        """Analysis report shows 'Effective findings (verdict based on)'."""
+        raw = [
+            _make_finding(Severity.HIGH, rule_id="real.1"),
+            _make_finding(Severity.LOW, rule_id="noise.1"),
+        ]
+        analysis = {
+            "confirmed": [{"rule_id": "real.1", "severity": "HIGH"}],
+            "dismissed": [{"rule_id": "noise.1", "reason": "fp"}],
+            "findings_analyzed": 2,
+        }
+        d = self._gate(raw, analysis)
+        assert "Effective findings (verdict based on): 1" in d.analysis_report
 
 
 # --- Analysis Report ---
