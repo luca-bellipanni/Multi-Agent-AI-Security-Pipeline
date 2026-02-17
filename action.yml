@@ -27,6 +27,10 @@ outputs:
     description: 'Total number of confirmed security findings'
   reason:
     description: 'Human-readable explanation of the decision'
+  safety_warnings_count:
+    description: 'Number of safety net warnings (dismissed HIGH/CRITICAL)'
+  excepted_count:
+    description: 'Number of findings auto-excepted by exception memory'
 
 runs:
   using: 'docker'

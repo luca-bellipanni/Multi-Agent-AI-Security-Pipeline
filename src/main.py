@@ -30,22 +30,24 @@ def write_outputs(outputs: dict[str, str]) -> None:
 
 
 def main() -> int:
+    print("::group::Pipeline Info")
     print("=== Agentic AppSec Pipeline ===")
-
     ctx = GitHubContext.from_environment()
     print(f"Mode: {ctx.mode}")
+    print("::endgroup::")
 
     engine = DecisionEngine()
     decision = engine.decide(ctx)
-    print(f"\nDecision: {decision.verdict.value}")
+
+    print("::group::Results")
+    print(f"Decision: {decision.verdict.value}")
     print(f"Findings: {decision.findings_count}")
     print(f"Reason: {decision.reason}")
-
     if decision.safety_warnings:
         print(f"\n*** {len(decision.safety_warnings)} SAFETY WARNING(S) ***")
-
     if decision.analysis_report:
         print(f"\n{decision.analysis_report}")
+    print("::endgroup::")
 
     # Save exception memory (auto-exceptions for next run)
     try:

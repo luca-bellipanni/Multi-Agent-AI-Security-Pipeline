@@ -44,9 +44,25 @@ class DecisionEngine:
 
     def decide(self, ctx: GitHubContext) -> Decision:
         """Main entry point: triage → analyzer → gate → Decision."""
-        triage = self._run_triage(ctx)
-        tool_results, agent_analysis = self._run_analyzer(ctx, triage)
-        return self._apply_gate(ctx, triage, tool_results, agent_analysis)
+        print("::group::Triage Agent")
+        try:
+            triage = self._run_triage(ctx)
+        finally:
+            print("::endgroup::")
+
+        print("::group::AppSec Agent (OODA Loop)")
+        try:
+            tool_results, agent_analysis = self._run_analyzer(ctx, triage)
+        finally:
+            print("::endgroup::")
+
+        print("::group::Smart Gate")
+        try:
+            decision = self._apply_gate(ctx, triage, tool_results, agent_analysis)
+        finally:
+            print("::endgroup::")
+
+        return decision
 
     def save_memory(self) -> None:
         """Save exception memory to disk (called by main.py after decide)."""
