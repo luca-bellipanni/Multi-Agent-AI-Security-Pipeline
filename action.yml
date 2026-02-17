@@ -17,6 +17,10 @@ inputs:
     description: 'LLM model ID for LiteLLM (e.g. gpt-4o-mini, anthropic/claude-sonnet-4-5-20250929)'
     required: false
     default: 'gpt-4o-mini'
+  command:
+    description: 'scan (default) or remediate'
+    required: false
+    default: 'scan'
 
 outputs:
   decision:
@@ -40,3 +44,4 @@ runs:
     INPUT_MODE: ${{ inputs.mode }}
     INPUT_AI_API_KEY: ${{ inputs.ai_api_key }}
     INPUT_AI_MODEL: ${{ inputs.ai_model }}
+    INPUT_COMMAND: ${{ inputs.command }}
