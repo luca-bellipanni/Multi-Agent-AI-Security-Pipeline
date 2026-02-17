@@ -9,7 +9,7 @@ Fallback to raw findings when agent hasn't analyzed (fail-secure).
 import json
 from unittest.mock import patch, MagicMock
 
-from src.models import Verdict, Severity, Finding, ToolResult
+from src.models import Verdict, Severity, Finding, StepTrace, ToolResult
 from src.github_context import GitHubContext
 from src.decision_engine import DecisionEngine
 
@@ -987,7 +987,7 @@ class TestAnalyzerIntegration:
         raw = [_make_finding(Severity.CRITICAL, rule_id="critical.vuln")]
         tr = _make_tool_result(raw)
         engine._run_analyzer = MagicMock(
-            return_value=([tr], _empty_analysis()),
+            return_value=([tr], _empty_analysis(), {}),
         )
 
         ctx = _make_context(mode="enforce")
@@ -1005,7 +1005,7 @@ class TestAnalyzerIntegration:
         engine = DecisionEngine()
         tr = _make_tool_result([])
         engine._run_analyzer = MagicMock(
-            return_value=([tr], _empty_analysis()),
+            return_value=([tr], _empty_analysis(), {}),
         )
 
         ctx = _make_context(mode="enforce")
@@ -1024,7 +1024,7 @@ class TestAnalyzerIntegration:
         raw = [_make_finding(Severity.CRITICAL, rule_id="critical.vuln")]
         tr = _make_tool_result(raw)
         engine._run_analyzer = MagicMock(
-            return_value=([tr], _empty_analysis()),
+            return_value=([tr], _empty_analysis(), {}),
         )
 
         ctx = _make_context(mode="shadow")
@@ -1058,7 +1058,7 @@ class TestCumulativeFindings:
             config_used=["p/python", "p/owasp-top-ten"],
         )
         engine._run_analyzer = MagicMock(
-            return_value=([tr], _empty_analysis()),
+            return_value=([tr], _empty_analysis(), {}),
         )
 
         ctx = _make_context(mode="enforce")
@@ -1079,7 +1079,7 @@ class TestCumulativeFindings:
             config_used=["p/security-audit", "p/python", "p/owasp-top-ten"],
         )
         engine._run_analyzer = MagicMock(
-            return_value=([tr], _empty_analysis()),
+            return_value=([tr], _empty_analysis(), {}),
         )
 
         ctx = _make_context(mode="enforce")
@@ -1089,3 +1089,330 @@ class TestCumulativeFindings:
         assert "p/security-audit" in configs
         assert "p/python" in configs
         assert "p/owasp-top-ten" in configs
+
+
+# --- Finding ID (deterministic hash) ---
+
+class TestFindingId:
+    """Test the deterministic finding_id property on Finding."""
+
+    def test_format(self):
+        """Finding ID starts with 'F' followed by 6 hex chars."""
+        f = _make_finding(rule_id="test.rule", path="a.py", line=1)
+        assert f.finding_id.startswith("F")
+        assert len(f.finding_id) == 7
+        # Check it's hex after the F
+        int(f.finding_id[1:], 16)
+
+    def test_deterministic(self):
+        """Same rule_id+path+line → same finding_id."""
+        f1 = _make_finding(rule_id="sqli", path="db.py", line=42)
+        f2 = _make_finding(rule_id="sqli", path="db.py", line=42)
+        assert f1.finding_id == f2.finding_id
+
+    def test_different_rule_id(self):
+        f1 = _make_finding(rule_id="rule.a", path="x.py", line=1)
+        f2 = _make_finding(rule_id="rule.b", path="x.py", line=1)
+        assert f1.finding_id != f2.finding_id
+
+    def test_different_path(self):
+        f1 = _make_finding(rule_id="rule.a", path="a.py", line=1)
+        f2 = _make_finding(rule_id="rule.a", path="b.py", line=1)
+        assert f1.finding_id != f2.finding_id
+
+    def test_different_line(self):
+        f1 = _make_finding(rule_id="rule.a", path="a.py", line=1)
+        f2 = _make_finding(rule_id="rule.a", path="a.py", line=2)
+        assert f1.finding_id != f2.finding_id
+
+    def test_independent_of_severity(self):
+        """ID only depends on rule_id+path+line, not severity."""
+        f1 = _make_finding(Severity.HIGH, rule_id="r", path="a.py", line=1)
+        f2 = _make_finding(Severity.LOW, rule_id="r", path="a.py", line=1)
+        assert f1.finding_id == f2.finding_id
+
+    def test_independent_of_message(self):
+        f1 = _make_finding(rule_id="r", path="a.py", line=1, message="msg1")
+        f2 = _make_finding(rule_id="r", path="a.py", line=1, message="msg2")
+        assert f1.finding_id == f2.finding_id
+
+
+# --- StepTrace ---
+
+class TestStepTrace:
+
+    def test_creation(self):
+        t = StepTrace(
+            name="Triage Agent",
+            tools_used={"fetch_pr_files": 1},
+            summary="3 files, Python",
+            status="success",
+        )
+        assert t.name == "Triage Agent"
+        assert t.tools_used == {"fetch_pr_files": 1}
+        assert t.summary == "3 files, Python"
+        assert t.status == "success"
+
+    def test_empty_tools(self):
+        t = StepTrace(name="Gate", tools_used={}, summary="ok", status="success")
+        assert t.tools_used == {}
+
+
+# --- Severity mismatch detection (LLM05) ---
+
+class TestSeverityMismatch:
+    """Test _check_severity_mismatches detects agent severity downgrades.
+
+    Security (LLM05 — anti-severity-manipulation): if the agent claims
+    a finding is lower severity than the raw scanner reported, the gate
+    flags it as a warning. Raw severity always wins.
+    """
+
+    def _check(self, raw_findings, agent_analysis):
+        engine = DecisionEngine()
+        return engine._check_severity_mismatches(raw_findings, agent_analysis)
+
+    def test_downgrade_high_to_low(self):
+        raw = [_make_finding(Severity.HIGH, rule_id="rule.a")]
+        analysis = {
+            "confirmed": [{"rule_id": "rule.a", "severity": "low"}],
+        }
+        warnings = self._check(raw, analysis)
+        assert len(warnings) == 1
+        assert warnings[0]["type"] == "severity_mismatch"
+        assert warnings[0]["severity"] == "high"
+        assert warnings[0]["agent_severity"] == "low"
+        assert warnings[0]["effective_severity"] == "high"
+
+    def test_downgrade_critical_to_medium(self):
+        raw = [_make_finding(Severity.CRITICAL, rule_id="rule.b")]
+        analysis = {
+            "confirmed": [{"rule_id": "rule.b", "severity": "medium"}],
+        }
+        warnings = self._check(raw, analysis)
+        assert len(warnings) == 1
+        assert warnings[0]["severity"] == "critical"
+        assert warnings[0]["agent_severity"] == "medium"
+
+    def test_no_mismatch_same_severity(self):
+        raw = [_make_finding(Severity.HIGH, rule_id="rule.a")]
+        analysis = {
+            "confirmed": [{"rule_id": "rule.a", "severity": "high"}],
+        }
+        warnings = self._check(raw, analysis)
+        assert len(warnings) == 0
+
+    def test_upgrade_no_warning(self):
+        """Agent upgrades severity → no warning (conservative is fine)."""
+        raw = [_make_finding(Severity.LOW, rule_id="rule.a")]
+        analysis = {
+            "confirmed": [{"rule_id": "rule.a", "severity": "high"}],
+        }
+        warnings = self._check(raw, analysis)
+        assert len(warnings) == 0
+
+    def test_unconfirmed_skipped(self):
+        """Findings not in agent confirmed are handled elsewhere."""
+        raw = [_make_finding(Severity.HIGH, rule_id="unconfirmed")]
+        analysis = {"confirmed": []}
+        warnings = self._check(raw, analysis)
+        assert len(warnings) == 0
+
+    def test_no_agent_severity_skipped(self):
+        """If agent doesn't provide severity field, no mismatch."""
+        raw = [_make_finding(Severity.HIGH, rule_id="rule.a")]
+        analysis = {
+            "confirmed": [{"rule_id": "rule.a"}],  # no severity
+        }
+        warnings = self._check(raw, analysis)
+        assert len(warnings) == 0
+
+    def test_unknown_agent_severity_skipped(self):
+        raw = [_make_finding(Severity.HIGH, rule_id="rule.a")]
+        analysis = {
+            "confirmed": [{"rule_id": "rule.a", "severity": "banana"}],
+        }
+        warnings = self._check(raw, analysis)
+        assert len(warnings) == 0
+
+    def test_multiple_mismatches(self):
+        raw = [
+            _make_finding(Severity.HIGH, rule_id="rule.a"),
+            _make_finding(Severity.CRITICAL, rule_id="rule.b"),
+        ]
+        analysis = {
+            "confirmed": [
+                {"rule_id": "rule.a", "severity": "low"},
+                {"rule_id": "rule.b", "severity": "medium"},
+            ],
+        }
+        warnings = self._check(raw, analysis)
+        assert len(warnings) == 2
+
+    def test_mismatch_in_gate_triggers_manual_review(self):
+        """Severity mismatch on HIGH finding triggers MANUAL_REVIEW."""
+        engine = DecisionEngine()
+        raw = [_make_finding(Severity.HIGH, rule_id="mismatch.rule")]
+        analysis = {
+            "confirmed": [{"rule_id": "mismatch.rule", "severity": "low"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+        }
+        tr = _make_tool_result(raw)
+        d = engine._apply_gate(
+            _make_context(mode="enforce"), _make_triage(), [tr], analysis,
+        )
+        # Should have a severity_mismatch warning
+        mismatch_warnings = [
+            w for w in d.safety_warnings if w["type"] == "severity_mismatch"
+        ]
+        assert len(mismatch_warnings) == 1
+        # The safety warning forces MANUAL_REVIEW
+        assert d.verdict == Verdict.MANUAL_REVIEW
+
+
+# --- Build confirmed structured ---
+
+class TestBuildConfirmedStructured:
+    """Test _build_confirmed_structured merges raw + agent context."""
+
+    def _build(self, effective_findings, agent_analysis):
+        engine = DecisionEngine()
+        return engine._build_confirmed_structured(
+            effective_findings, agent_analysis,
+        )
+
+    def test_basic_merge(self):
+        findings = [_make_finding(Severity.HIGH, rule_id="sqli")]
+        analysis = {
+            "confirmed": [{
+                "rule_id": "sqli",
+                "severity": "HIGH",
+                "reason": "real injection",
+                "recommendation": "use params",
+            }],
+        }
+        result = self._build(findings, analysis)
+        assert len(result) == 1
+        assert result[0]["finding_id"] == findings[0].finding_id
+        assert result[0]["rule_id"] == "sqli"
+        assert result[0]["severity"] == "high"  # from raw
+        assert result[0]["agent_reason"] == "real injection"
+        assert result[0]["agent_recommendation"] == "use params"
+
+    def test_missing_agent_context(self):
+        """If agent didn't provide context for a finding, empty strings."""
+        findings = [_make_finding(Severity.MEDIUM, rule_id="orphan")]
+        analysis = {"confirmed": []}
+        result = self._build(findings, analysis)
+        assert len(result) == 1
+        assert result[0]["agent_reason"] == ""
+        assert result[0]["agent_recommendation"] == ""
+
+    def test_includes_path_and_line(self):
+        findings = [_make_finding(path="db.py", line=42)]
+        analysis = {"confirmed": []}
+        result = self._build(findings, analysis)
+        assert result[0]["path"] == "db.py"
+        assert result[0]["line"] == 42
+
+    def test_empty_findings(self):
+        result = self._build([], {"confirmed": []})
+        assert result == []
+
+
+# --- Structured findings on Decision ---
+
+class TestDecisionStructuredFindings:
+    """Test that Decision carries structured findings lists."""
+
+    def _gate(self, findings, analysis, mode="enforce"):
+        engine = DecisionEngine()
+        tr = _make_tool_result(findings)
+        return engine._apply_gate(
+            _make_context(mode=mode), _make_triage(), [tr], analysis,
+        )
+
+    def test_confirmed_findings_populated(self):
+        raw = [_make_finding(Severity.HIGH, rule_id="real.vuln")]
+        analysis = {
+            "confirmed": [{
+                "rule_id": "real.vuln",
+                "severity": "HIGH",
+                "reason": "real issue",
+                "recommendation": "fix it",
+            }],
+            "dismissed": [],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis)
+        assert len(d.confirmed_findings) == 1
+        assert d.confirmed_findings[0]["rule_id"] == "real.vuln"
+        assert d.confirmed_findings[0]["finding_id"] == raw[0].finding_id
+
+    def test_dismissed_findings_populated(self):
+        raw = [_make_finding(Severity.LOW, rule_id="noise.rule")]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [{"rule_id": "noise.rule", "reason": "test file"}],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis)
+        assert len(d.dismissed_findings) == 1
+        assert d.dismissed_findings[0]["rule_id"] == "noise.rule"
+
+    def test_shadow_mode_has_structured_findings(self):
+        raw = [_make_finding(Severity.HIGH, rule_id="shadow.vuln")]
+        analysis = {
+            "confirmed": [{"rule_id": "shadow.vuln", "severity": "HIGH"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+        }
+        d = self._gate(raw, analysis, mode="shadow")
+        assert len(d.confirmed_findings) == 1
+
+
+# --- Execution trace ---
+
+class TestExecutionTrace:
+    """Test that decide() populates the trace list."""
+
+    def test_trace_populated_on_decide(self):
+        """decide() should produce trace with 3 entries."""
+        decision = DecisionEngine().decide(_make_context(mode="shadow"))
+        assert len(decision.trace) == 3
+        names = [t.name for t in decision.trace]
+        assert "Triage Agent" in names
+        assert "AppSec Agent (OODA)" in names
+        assert "Smart Gate" in names
+
+    def test_trace_all_success(self):
+        decision = DecisionEngine().decide(_make_context(mode="shadow"))
+        for t in decision.trace:
+            assert t.status == "success"
+
+    def test_gate_trace_has_verdict(self):
+        decision = DecisionEngine().decide(_make_context(mode="shadow"))
+        gate_trace = [t for t in decision.trace if t.name == "Smart Gate"][0]
+        assert gate_trace.summary == "allowed"
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.run_triage", return_value=_make_triage())
+    @patch("src.agent.create_triage_agent")
+    def test_trace_with_mocked_analyzer(
+        self, mock_create_triage, mock_run_triage,
+    ):
+        engine = DecisionEngine()
+        raw = [_make_finding(Severity.HIGH, rule_id="trace.rule")]
+        tr = _make_tool_result(raw)
+        engine._run_analyzer = MagicMock(
+            return_value=([tr], _empty_analysis(), {"run_semgrep": 2, "fetch_pr_diff": 1}),
+        )
+
+        ctx = _make_context(mode="enforce")
+        decision = engine.decide(ctx)
+
+        assert len(decision.trace) == 3
+        analyzer_trace = [t for t in decision.trace if "OODA" in t.name][0]
+        assert analyzer_trace.tools_used == {"run_semgrep": 2, "fetch_pr_diff": 1}
+        assert "1 raw" in analyzer_trace.summary

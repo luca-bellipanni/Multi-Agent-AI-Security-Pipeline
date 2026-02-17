@@ -20,7 +20,7 @@ Security (llm-security/output-handling — LLM05):
 import os
 
 from src.models import (
-    Decision, Finding, Severity, ToolResult, Verdict,
+    Decision, Finding, Severity, StepTrace, ToolResult, Verdict,
     SEVERITY_ORDER,
 )
 from src.github_context import GitHubContext
@@ -44,21 +44,61 @@ class DecisionEngine:
 
     def decide(self, ctx: GitHubContext) -> Decision:
         """Main entry point: triage → analyzer → gate → Decision."""
+        traces: list[StepTrace] = []
+
         print("::group::Triage Agent")
         try:
-            triage = self._run_triage(ctx)
+            triage, triage_tools = self._run_triage(ctx)
+            triage_summary = triage.get("context", {}).get(
+                "change_summary", ""
+            )
+            traces.append(StepTrace(
+                name="Triage Agent",
+                tools_used=triage_tools,
+                summary=triage_summary,
+                status="success",
+            ))
+        except Exception:
+            traces.append(StepTrace(
+                name="Triage Agent", tools_used={},
+                summary="failed", status="error",
+            ))
+            raise
         finally:
             print("::endgroup::")
 
         print("::group::AppSec Agent (OODA Loop)")
         try:
-            tool_results, agent_analysis = self._run_analyzer(ctx, triage)
+            tool_results, agent_analysis, analyzer_tools = self._run_analyzer(
+                ctx, triage,
+            )
+            raw_count = sum(len(tr.findings) for tr in tool_results)
+            confirmed_count = len(agent_analysis.get("confirmed", []))
+            traces.append(StepTrace(
+                name="AppSec Agent (OODA)",
+                tools_used=analyzer_tools,
+                summary=f"{raw_count} raw -> {confirmed_count} confirmed",
+                status="success",
+            ))
+        except Exception:
+            traces.append(StepTrace(
+                name="AppSec Agent (OODA)", tools_used={},
+                summary="failed", status="error",
+            ))
+            raise
         finally:
             print("::endgroup::")
 
         print("::group::Smart Gate")
         try:
             decision = self._apply_gate(ctx, triage, tool_results, agent_analysis)
+            traces.append(StepTrace(
+                name="Smart Gate",
+                tools_used={},
+                summary=decision.verdict.value,
+                status="success",
+            ))
+            decision.trace = traces
         finally:
             print("::endgroup::")
 
@@ -69,8 +109,11 @@ class DecisionEngine:
         if self._memory_store is not None:
             self._memory_store.save()
 
-    def _run_triage(self, ctx: GitHubContext) -> dict:
-        """Run AI triage if configured, otherwise return default."""
+    def _run_triage(self, ctx: GitHubContext) -> tuple[dict, dict[str, int]]:
+        """Run AI triage if configured, otherwise return default.
+
+        Returns (triage_result, tools_used) for execution trace.
+        """
         api_key = os.environ.get("INPUT_AI_API_KEY", "")
         model_id = os.environ.get("INPUT_AI_MODEL", "gpt-4o-mini")
 
@@ -87,7 +130,7 @@ class DecisionEngine:
                 },
                 "recommended_agents": ["appsec"],
                 "reason": "No AI configured, running default agent.",
-            }
+            }, {}
 
         try:
             from src.agent import create_triage_agent, run_triage
@@ -95,19 +138,24 @@ class DecisionEngine:
 
             print(f"Running AI triage (model: {model_id})...")
 
+            fetch_tool = None
             tools = []
             if ctx.token and ctx.repository and ctx.pr_number:
-                tools.append(
-                    FetchPRFilesTool(
-                        github_token=ctx.token,
-                        repository=ctx.repository,
-                    )
+                fetch_tool = FetchPRFilesTool(
+                    github_token=ctx.token,
+                    repository=ctx.repository,
                 )
+                tools.append(fetch_tool)
 
             agent = create_triage_agent(api_key, model_id, tools=tools)
             result = run_triage(agent, ctx)
             print(f"AI triage complete: {result['reason']}")
-            return result
+
+            tools_used: dict[str, int] = {}
+            if fetch_tool is not None and fetch_tool._call_count > 0:
+                tools_used["fetch_pr_files"] = fetch_tool._call_count
+
+            return result, tools_used
         except Exception as e:
             print(f"::warning::AI triage failed: {e}")
             print("Falling back to deterministic mode.")
@@ -122,12 +170,14 @@ class DecisionEngine:
                 },
                 "recommended_agents": ["appsec"],
                 "reason": "AI error, using fallback.",
-            }
+            }, {}
 
     def _run_analyzer(
         self, ctx: GitHubContext, triage: dict,
-    ) -> tuple[list[ToolResult], dict]:
-        """Run the AppSec Agent (OODA loop) and return (raw_tool_results, agent_analysis).
+    ) -> tuple[list[ToolResult], dict, dict[str, int]]:
+        """Run the AppSec Agent (OODA loop).
+
+        Returns (raw_tool_results, agent_analysis, tools_used).
 
         Security (LLM05 — untrusted output handling):
         Raw findings come from the tool's CUMULATIVE side channel, NOT
@@ -143,12 +193,12 @@ class DecisionEngine:
 
         if not api_key:
             print("No AI API key — skipping analyzer.")
-            return [], dict(_EMPTY_ANALYSIS)
+            return [], dict(_EMPTY_ANALYSIS), {}
 
         agents = triage.get("recommended_agents", [])
         if "appsec" not in agents:
             print("AppSec agent not recommended by triage, skipping.")
-            return [], dict(_EMPTY_ANALYSIS)
+            return [], dict(_EMPTY_ANALYSIS), {}
 
         try:
             from src.analyzer_agent import create_analyzer_agent, run_analyzer
@@ -156,8 +206,9 @@ class DecisionEngine:
 
             print("Running AppSec Agent (OODA loop)...")
 
-            # Create tools — we keep semgrep_tool ref for the side channel
+            # Create tools — we keep refs for the side channel + call counting
             semgrep_tool = SemgrepTool(workspace_path=ctx.workspace)
+            diff_tool = None
             tools = [semgrep_tool]
 
             # Observe tool: only if PR context available (LLM06)
@@ -190,7 +241,14 @@ class DecisionEngine:
                 error=tool_error,
             )]
 
-            return tool_results, analysis
+            # Collect tool call counts for trace
+            tools_used: dict[str, int] = {}
+            if semgrep_tool._call_count > 0:
+                tools_used["run_semgrep"] = semgrep_tool._call_count
+            if diff_tool is not None and diff_tool._call_count > 0:
+                tools_used["fetch_pr_diff"] = diff_tool._call_count
+
+            return tool_results, analysis, tools_used
 
         except Exception as e:
             print(f"::warning::AppSec Agent failed: {e}")
@@ -199,7 +257,7 @@ class DecisionEngine:
                 success=False,
                 findings=[],
                 error=str(e),
-            )], dict(_EMPTY_ANALYSIS)
+            )], dict(_EMPTY_ANALYSIS), {}
 
     def _check_agent_dismissals(
         self,
@@ -294,6 +352,91 @@ class DecisionEngine:
             if isinstance(c, dict) and isinstance(c.get("rule_id"), str)
         }
         return [f for f in raw_findings if f.rule_id in confirmed_rule_ids]
+
+    def _build_confirmed_structured(
+        self,
+        effective_findings: list[Finding],
+        agent_analysis: dict,
+    ) -> list[dict]:
+        """Build structured confirmed findings for PR report / scan-results.
+
+        Merges raw Finding data (gate-validated) with agent analysis context
+        (reason, recommendation). Severity always from raw.
+        """
+        # Agent context by rule_id (for reason/recommendation)
+        agent_by_rule: dict[str, dict] = {}
+        for c in agent_analysis.get("confirmed", []):
+            if isinstance(c, dict) and isinstance(c.get("rule_id"), str):
+                agent_by_rule[c["rule_id"]] = c
+
+        result = []
+        for f in effective_findings:
+            agent_ctx = agent_by_rule.get(f.rule_id, {})
+            result.append({
+                "finding_id": f.finding_id,
+                "rule_id": f.rule_id,
+                "path": f.path,
+                "line": f.line,
+                "severity": f.severity.value,
+                "message": f.message,
+                "agent_reason": agent_ctx.get("reason", ""),
+                "agent_recommendation": agent_ctx.get("recommendation", ""),
+            })
+        return result
+
+    def _check_severity_mismatches(
+        self,
+        raw_findings: list[Finding],
+        agent_analysis: dict,
+    ) -> list[dict]:
+        """Detect when agent downgrades severity vs raw scanner data.
+
+        Security (LLM05 — anti-severity-manipulation):
+        If the agent claims a finding is lower severity than the raw scanner
+        reported, this is a warning. The raw severity always wins, but the
+        mismatch is flagged for human review.
+        """
+        warnings = []
+
+        # Map confirmed agent claims: rule_id → agent severity string
+        agent_sev_by_rule: dict[str, str] = {}
+        for c in agent_analysis.get("confirmed", []):
+            if isinstance(c, dict) and isinstance(c.get("rule_id"), str):
+                agent_sev = c.get("severity", "")
+                if isinstance(agent_sev, str) and agent_sev:
+                    agent_sev_by_rule[c["rule_id"]] = agent_sev.lower()
+
+        # Severity string → index for comparison
+        sev_str_to_idx = {s.value: i for i, s in enumerate(SEVERITY_ORDER)}
+
+        for finding in raw_findings:
+            agent_sev_str = agent_sev_by_rule.get(finding.rule_id)
+            if agent_sev_str is None:
+                continue  # not confirmed by agent, handled elsewhere
+
+            raw_idx = SEVERITY_ORDER.index(finding.severity)
+            agent_idx = sev_str_to_idx.get(agent_sev_str, -1)
+
+            if agent_idx == -1:
+                continue  # unrecognized severity string, skip
+
+            if agent_idx < raw_idx:
+                warnings.append({
+                    "type": "severity_mismatch",
+                    "rule_id": finding.rule_id,
+                    "severity": finding.severity.value,
+                    "agent_severity": agent_sev_str,
+                    "effective_severity": finding.severity.value,
+                    "path": finding.path,
+                    "line": finding.line,
+                    "message": (
+                        f"Agent downgraded {finding.rule_id} from "
+                        f"{finding.severity.value} to {agent_sev_str}. "
+                        f"Using raw severity: {finding.severity.value}."
+                    ),
+                })
+
+        return warnings
 
     def _build_analysis_report(
         self,
@@ -443,6 +586,11 @@ class DecisionEngine:
             safety_warnings = self._check_agent_dismissals(
                 active_findings, agent_analysis,
             )
+            # Severity mismatch: agent downgraded severity
+            sev_mismatches = self._check_severity_mismatches(
+                active_findings, agent_analysis,
+            )
+            safety_warnings.extend(sev_mismatches)
             if safety_warnings:
                 for w in safety_warnings:
                     print(f"::warning::Safety net: {w['message']}")
@@ -490,6 +638,13 @@ class DecisionEngine:
 
         excepted_count = len(excepted_info)
 
+        # Build structured findings lists for PR reporting
+        confirmed_structured = self._build_confirmed_structured(
+            effective_findings, agent_analysis,
+        )
+        dismissed_structured = agent_analysis.get("dismissed", [])
+        excepted_structured = excepted_info
+
         # Shadow mode: always allow, but report everything
         if ctx.mode == "shadow":
             raw_count = len(raw_findings)
@@ -514,6 +669,9 @@ class DecisionEngine:
                 tool_results=tool_results,
                 analysis_report=analysis_report,
                 safety_warnings=safety_warnings,
+                confirmed_findings=confirmed_structured,
+                dismissed_findings=dismissed_structured,
+                excepted_findings=excepted_structured,
             )
 
         # Enforce mode — verdict based on effective findings + safety net
@@ -587,4 +745,7 @@ class DecisionEngine:
             tool_results=tool_results,
             analysis_report=analysis_report,
             safety_warnings=safety_warnings,
+            confirmed_findings=confirmed_structured,
+            dismissed_findings=dismissed_structured,
+            excepted_findings=excepted_structured,
         )

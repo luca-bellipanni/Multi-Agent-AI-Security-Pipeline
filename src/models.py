@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import hashlib
 import json
 
 
@@ -33,6 +34,21 @@ class Finding:
     severity: Severity
     message: str
 
+    @property
+    def finding_id(self) -> str:
+        """Deterministic short ID: F{hash[:6]} from rule_id+path+line."""
+        key = f"{self.rule_id}::{self.path}::{self.line}"
+        return "F" + hashlib.sha256(key.encode()).hexdigest()[:6]
+
+
+@dataclass
+class StepTrace:
+    """Execution trace for one pipeline phase (scalable to N agents)."""
+    name: str
+    tools_used: dict[str, int]
+    summary: str
+    status: str  # "success" | "error" | "skipped"
+
 
 @dataclass
 class ToolResult:
@@ -56,6 +72,11 @@ class Decision:
     tool_results: list[ToolResult] = field(default_factory=list)
     analysis_report: str = ""
     safety_warnings: list[dict] = field(default_factory=list)
+    trace: list[StepTrace] = field(default_factory=list)
+    confirmed_findings: list[dict] = field(default_factory=list)
+    dismissed_findings: list[dict] = field(default_factory=list)
+    excepted_findings: list[dict] = field(default_factory=list)
+    scan_results_path: str = ""
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

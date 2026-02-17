@@ -229,10 +229,12 @@ class FetchPRFilesTool(Tool):
         # Set instance attrs BEFORE super().__init__() which runs validation
         self.github_token = github_token
         self.repository = repository
+        self._call_count: int = 0
         super().__init__(**kwargs)
 
     def forward(self, pr_number: int) -> str:
         """Fetch PR file list from GitHub API and return formatted summary."""
+        self._call_count += 1
         if not self.github_token:
             return "Error: No GitHub token available. Cannot fetch PR files."
         if not self.repository:
@@ -316,6 +318,7 @@ class FetchPRDiffTool(Tool):
         self.repository = repository
         self.pr_number = pr_number
         self._files_cache: list[dict] | None = None
+        self._call_count: int = 0
         super().__init__(**kwargs)
 
     def _fetch_files(self) -> tuple[list[dict], str | None]:
@@ -339,6 +342,7 @@ class FetchPRDiffTool(Tool):
 
     def forward(self, file_paths: str) -> str:
         """Return formatted diffs for requested files."""
+        self._call_count += 1
         files, error = self._fetch_files()
         if error:
             return error
@@ -521,6 +525,7 @@ class SemgrepTool(Tool):
         # Cumulative across all calls (OODA: agent may call multiple times):
         self._all_raw_findings: list[Finding] = []
         self._all_configs_used: list[str] = []
+        self._call_count: int = 0
         super().__init__(**kwargs)
 
     def forward(self, config: str) -> str:
@@ -529,6 +534,7 @@ class SemgrepTool(Tool):
         Side effect: populates _last_raw_findings for the gate to read
         independently of what the agent reports (LLM05: untrusted output).
         """
+        self._call_count += 1
         # Reset side channel
         self._last_raw_findings = []
         self._last_config_used = []

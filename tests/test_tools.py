@@ -1011,3 +1011,70 @@ class TestFetchPRDiffTool:
         result = tool.forward("all")
         assert "added" in result
         assert "+5" in result
+
+
+# --- Tool call counting ---
+
+class TestToolCallCount:
+    """Test _call_count tracking on all tools.
+
+    The call count is used by the execution trace (StepTrace) to record
+    how many times each tool was invoked during the pipeline.
+    """
+
+    def test_fetch_pr_files_initial_zero(self):
+        tool = FetchPRFilesTool(github_token="tok", repository="o/r")
+        assert tool._call_count == 0
+
+    @patch("src.tools.requests.get")
+    def test_fetch_pr_files_increments(self, mock_get):
+        pr_resp = MagicMock()
+        pr_resp.status_code = 200
+        pr_resp.json.return_value = {"title": "test"}
+        files_resp = MagicMock()
+        files_resp.status_code = 200
+        files_resp.json.return_value = []
+        mock_get.side_effect = [pr_resp, files_resp, pr_resp, files_resp]
+
+        tool = FetchPRFilesTool(github_token="tok", repository="o/r")
+        tool.forward(pr_number=1)
+        assert tool._call_count == 1
+        tool.forward(pr_number=2)
+        assert tool._call_count == 2
+
+    def test_fetch_pr_diff_initial_zero(self):
+        tool = FetchPRDiffTool(github_token="tok", repository="o/r", pr_number=1)
+        assert tool._call_count == 0
+
+    @patch("src.tools._fetch_pr_files_from_api")
+    def test_fetch_pr_diff_increments(self, mock_api):
+        mock_api.return_value = (
+            [_make_gh_file_with_patch("a.py", patch="p")], None,
+        )
+        tool = FetchPRDiffTool(github_token="tok", repository="o/r", pr_number=1)
+        tool.forward("all")
+        assert tool._call_count == 1
+        tool.forward("a.py")
+        assert tool._call_count == 2
+
+    def test_semgrep_initial_zero(self):
+        tool = SemgrepTool(workspace_path="/tmp")
+        assert tool._call_count == 0
+
+    @patch("src.tools.subprocess.run")
+    def test_semgrep_increments(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("p/python")
+        assert tool._call_count == 1
+        tool.forward("p/java")
+        assert tool._call_count == 2
+
+    def test_semgrep_counts_on_validation_error(self):
+        """_call_count increments even when validation fails."""
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("/etc/passwd")  # invalid ruleset
+        assert tool._call_count == 1
