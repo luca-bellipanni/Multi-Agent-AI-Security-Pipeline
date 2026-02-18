@@ -303,7 +303,7 @@ class DecisionEngine:
             elif semgrep_tool._call_count > 0:
                 print("  Files scanned: 0 (Semgrep scanned no files!)")
             if semgrep_tool._last_stderr:
-                stderr_preview = semgrep_tool._last_stderr.strip()[:500]
+                stderr_preview = semgrep_tool._last_stderr.strip()[:2000]
                 print(f"  Stderr: {stderr_preview}")
             # Workspace listing: show what's actually on disk
             ws = semgrep_tool.workspace_path
