@@ -218,7 +218,7 @@ class RemediationEngine:
             create_remediation_agent, build_remediation_task,
         )
 
-        from src.observability import make_step_logger
+        from src.observability import make_step_logger, run_with_timeout
 
         read_tool = ReadCodeTool(workspace_path=ctx.workspace)
         apply_tool = ApplyFixTool(
@@ -236,7 +236,12 @@ class RemediationEngine:
             step_callbacks=[callback],
         )
         task = build_remediation_task(file_path, findings)
-        agent.run(task)
+        run_with_timeout(
+            agent.run, (task,),
+            max_seconds=600,
+            agent_name=f"Remediation:{file_path}",
+            agent=agent,
+        )
 
         # Side channel: read fix audit log
         self._all_fix_logs.extend(apply_tool._fix_log)

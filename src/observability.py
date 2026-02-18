@@ -1,14 +1,20 @@
 """Agent observability — step logging + timeout for CI visibility.
 
-Provides make_step_logger(), a factory that returns a smolagents
-step_callback. The callback prints per-step diagnostics (duration,
-tools called, token usage) and enforces an optional agent-level timeout.
+Provides:
+- make_step_logger(): smolagents step_callback for per-step diagnostics
+- run_with_timeout(): hard thread-based timeout for agent.run() calls
+
+The step_callback handles inter-step logging and soft timeout (checked
+between steps). run_with_timeout() adds a hard timeout that works even
+when a single LLM call hangs indefinitely, plus a heartbeat so CI
+output never goes silent.
 
 Used by decision_engine.py (triage + analyzer) and remediation_engine.py.
 """
 
+import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 
 
 def make_step_logger(
@@ -73,3 +79,77 @@ def make_step_logger(
                   f"(limit: {max_seconds:.0f}s)")
 
     return callback
+
+
+def run_with_timeout(
+    fn: Callable,
+    args: tuple = (),
+    *,
+    max_seconds: float,
+    agent_name: str = "Agent",
+    agent: Any = None,
+) -> Any:
+    """Execute fn(*args) with a hard thread-based timeout and heartbeat.
+
+    Runs ``fn(*args)`` in a daemon thread. While waiting, prints a
+    heartbeat message every 30 s so CI output never goes silent.
+    If the function doesn't complete within *max_seconds*, sets
+    ``agent.interrupt_switch = True`` (if agent provided) and raises
+    :class:`TimeoutError`.
+
+    Args:
+        fn: Callable to execute (e.g. ``run_triage`` or ``agent.run``).
+        args: Positional arguments for *fn*.
+        max_seconds: Hard timeout in seconds.
+        agent_name: Label for heartbeat / timeout messages.
+        agent: Optional smolagents agent — used to set interrupt_switch.
+
+    Returns:
+        Whatever *fn* returns.
+
+    Raises:
+        TimeoutError: If *fn* doesn't complete within *max_seconds*.
+        Exception: Re-raised if *fn* raises.
+    """
+    result_holder: list[Any] = [None]
+    error_holder: list[BaseException | None] = [None]
+
+    def target():
+        try:
+            result_holder[0] = fn(*args)
+        except Exception as exc:
+            error_holder[0] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+
+    start = time.monotonic()
+    while thread.is_alive():
+        remaining = max_seconds - (time.monotonic() - start)
+        if remaining <= 0:
+            break
+        thread.join(timeout=min(30, remaining))
+        if thread.is_alive():
+            elapsed = time.monotonic() - start
+            if elapsed < max_seconds:
+                print(f"  [{agent_name}] Still running... ({elapsed:.0f}s)")
+
+    if thread.is_alive():
+        # Hard timeout — try graceful shutdown
+        if agent is not None:
+            agent.interrupt_switch = True
+        elapsed = time.monotonic() - start
+        print(
+            f"  [{agent_name}] HARD TIMEOUT — "
+            f"{elapsed:.0f}s elapsed (limit: {max_seconds:.0f}s)"
+        )
+        # Grace period: let the agent finish current step
+        thread.join(timeout=10)
+        raise TimeoutError(
+            f"{agent_name} did not complete within {max_seconds:.0f}s"
+        )
+
+    if error_holder[0]:
+        raise error_holder[0]
+
+    return result_holder[0]

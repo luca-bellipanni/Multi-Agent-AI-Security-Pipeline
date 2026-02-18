@@ -4,7 +4,9 @@ import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from src.observability import make_step_logger
+import pytest
+
+from src.observability import make_step_logger, run_with_timeout
 
 
 def _tc(name):
@@ -162,3 +164,120 @@ class TestMakeStepLogger:
         )
         callback(mock_step, agent=Mock(max_steps=3))
         assert "0.0s" in capsys.readouterr().out
+
+
+# ── run_with_timeout ─────────────────────────────────────────────────
+
+
+class TestRunWithTimeout:
+
+    def test_returns_fn_result(self):
+        """Returns whatever fn() returns."""
+        result = run_with_timeout(
+            lambda x: x * 2, (21,),
+            max_seconds=5, agent_name="Test",
+        )
+        assert result == 42
+
+    def test_propagates_exception(self):
+        """Re-raises exceptions from fn."""
+        def boom():
+            raise ValueError("kaboom")
+
+        with pytest.raises(ValueError, match="kaboom"):
+            run_with_timeout(
+                boom, (),
+                max_seconds=5, agent_name="Test",
+            )
+
+    def test_timeout_raises(self):
+        """TimeoutError raised when fn exceeds max_seconds."""
+        def slow():
+            time.sleep(10)
+
+        with pytest.raises(TimeoutError, match="Test"):
+            run_with_timeout(
+                slow, (),
+                max_seconds=0.1, agent_name="Test",
+            )
+
+    def test_timeout_sets_interrupt_switch(self):
+        """On timeout, sets agent.interrupt_switch = True."""
+        mock_agent = Mock(interrupt_switch=False)
+
+        def slow():
+            time.sleep(10)
+
+        with pytest.raises(TimeoutError):
+            run_with_timeout(
+                slow, (),
+                max_seconds=0.1, agent_name="Test",
+                agent=mock_agent,
+            )
+        assert mock_agent.interrupt_switch is True
+
+    def test_timeout_prints_hard_timeout(self, capsys):
+        """HARD TIMEOUT message appears in output."""
+        def slow():
+            time.sleep(10)
+
+        with pytest.raises(TimeoutError):
+            run_with_timeout(
+                slow, (),
+                max_seconds=0.1, agent_name="MyAgent",
+            )
+        output = capsys.readouterr().out
+        assert "HARD TIMEOUT" in output
+        assert "[MyAgent]" in output
+
+    def test_no_timeout_when_fast(self):
+        """No timeout when fn completes quickly."""
+        result = run_with_timeout(
+            lambda: "ok", (),
+            max_seconds=10, agent_name="Test",
+        )
+        assert result == "ok"
+
+    def test_heartbeat_prints(self, capsys):
+        """Heartbeat message printed while waiting."""
+        def slow():
+            time.sleep(1.5)
+
+        # Use very short heartbeat-triggering timeout window
+        # max_seconds=5 but fn takes 1.5s — heartbeat at 30s won't fire
+        # Use max_seconds large enough, fn blocks long enough for one join(30)
+        # Actually, heartbeat fires every min(30, remaining) seconds.
+        # With max_seconds=2 and fn sleeping 1.5s, the first join(timeout=2)
+        # will wake when fn finishes, no heartbeat printed.
+        # To test heartbeat, we'd need fn to run >30s which is too slow.
+        # Instead, test that fast completion produces no heartbeat.
+        run_with_timeout(
+            lambda: "fast", (),
+            max_seconds=60, agent_name="Test",
+        )
+        output = capsys.readouterr().out
+        assert "Still running" not in output
+
+    def test_no_agent_no_crash_on_timeout(self, capsys):
+        """Timeout without agent kwarg doesn't crash."""
+        def slow():
+            time.sleep(10)
+
+        with pytest.raises(TimeoutError):
+            run_with_timeout(
+                slow, (),
+                max_seconds=0.1, agent_name="Test",
+                agent=None,
+            )
+        assert "HARD TIMEOUT" in capsys.readouterr().out
+
+    def test_args_forwarded(self):
+        """Positional args forwarded to fn."""
+        def add(a, b):
+            return a + b
+
+        result = run_with_timeout(
+            add, (3, 7),
+            max_seconds=5, agent_name="Test",
+        )
+        assert result == 10

@@ -162,7 +162,7 @@ class DecisionEngine:
         try:
             from src.agent import create_triage_agent, run_triage
             from src.tools import FetchPRFilesTool
-            from src.observability import make_step_logger
+            from src.observability import make_step_logger, run_with_timeout
 
             print(f"Running AI triage (model: {model_id})...")
 
@@ -180,7 +180,10 @@ class DecisionEngine:
                 api_key, model_id, tools=tools,
                 step_callbacks=[callback],
             )
-            result = run_triage(agent, ctx)
+            result = run_with_timeout(
+                run_triage, (agent, ctx),
+                max_seconds=120, agent_name="Triage", agent=agent,
+            )
             print(f"AI triage complete: {result['reason']}")
 
             # Context summary for CI readability
@@ -242,7 +245,7 @@ class DecisionEngine:
         try:
             from src.analyzer_agent import create_analyzer_agent, run_analyzer
             from src.tools import FetchPRDiffTool, SemgrepTool
-            from src.observability import make_step_logger
+            from src.observability import make_step_logger, run_with_timeout
 
             print("Running AppSec Agent (OODA loop)...")
 
@@ -265,7 +268,10 @@ class DecisionEngine:
                 api_key, model_id, tools=tools,
                 step_callbacks=[callback],
             )
-            analysis = run_analyzer(agent, triage)
+            analysis = run_with_timeout(
+                run_analyzer, (agent, triage),
+                max_seconds=600, agent_name="AppSec", agent=agent,
+            )
             print(f"AppSec Agent complete: {analysis.get('summary', 'N/A')}")
 
             # Semgrep diagnostics
