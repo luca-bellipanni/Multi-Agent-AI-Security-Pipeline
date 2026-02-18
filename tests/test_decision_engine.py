@@ -965,15 +965,49 @@ class TestAnalyzerIntegration:
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
     @patch("src.agent.run_triage", return_value=_make_triage(
         recommended_agents=[],
+        reason="Only .md files changed, no code to scan",
     ))
     @patch("src.agent.create_triage_agent")
-    def test_analyzer_skipped_when_no_appsec(
+    def test_triage_skip_produces_allowed(
         self, mock_create_triage, mock_run_triage,
     ):
-        """When triage doesn't recommend appsec agent, analyzer is skipped."""
+        """When triage says no agents needed (docs-only), verdict is ALLOWED."""
         ctx = _make_context(mode="enforce")
         decision = DecisionEngine().decide(ctx)
-        assert decision.verdict == Verdict.MANUAL_REVIEW
+        assert decision.verdict == Verdict.ALLOWED
+        assert decision.continue_pipeline is True
+        assert "No security-relevant files" in decision.reason
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.run_triage", return_value=_make_triage(
+        recommended_agents=[],
+    ))
+    @patch("src.agent.create_triage_agent")
+    def test_triage_skip_shadow_mode(
+        self, mock_create_triage, mock_run_triage,
+    ):
+        """Triage skip in shadow mode also produces ALLOWED."""
+        ctx = _make_context(mode="shadow")
+        decision = DecisionEngine().decide(ctx)
+        assert decision.verdict == Verdict.ALLOWED
+        assert decision.continue_pipeline is True
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
+    @patch("src.agent.run_triage", return_value=_make_triage(
+        recommended_agents=[],
+    ))
+    @patch("src.agent.create_triage_agent")
+    def test_triage_skip_trace_shows_skipped(
+        self, mock_create_triage, mock_run_triage,
+    ):
+        """Trace shows status='skipped' for AppSec Agent when triage skips."""
+        ctx = _make_context(mode="enforce")
+        decision = DecisionEngine().decide(ctx)
+        appsec_trace = next(
+            t for t in decision.trace if "AppSec" in t.name
+        )
+        assert appsec_trace.status == "skipped"
+        assert "Skipped" in appsec_trace.summary
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "fake-key", "INPUT_AI_MODEL": "gpt-4o-mini"})
     @patch("src.agent.run_triage", return_value=_make_triage())

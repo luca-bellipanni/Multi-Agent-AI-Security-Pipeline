@@ -67,19 +67,35 @@ class DecisionEngine:
         finally:
             print("::endgroup::")
 
+        # Detect intentional skip: triage says no agents needed
+        triage_skip = "appsec" not in triage.get(
+            "recommended_agents", ["appsec"],
+        )
+
         print("::group::AppSec Agent (OODA Loop)")
         try:
-            tool_results, agent_analysis, analyzer_tools = self._run_analyzer(
-                ctx, triage,
-            )
-            raw_count = sum(len(tr.findings) for tr in tool_results)
-            confirmed_count = len(agent_analysis.get("confirmed", []))
-            traces.append(StepTrace(
-                name="AppSec Agent (OODA)",
-                tools_used=analyzer_tools,
-                summary=f"{raw_count} raw -> {confirmed_count} confirmed",
-                status="success",
-            ))
+            if triage_skip:
+                tool_results: list[ToolResult] = []
+                agent_analysis = dict(_EMPTY_ANALYSIS)
+                print("AppSec agent not recommended by triage, skipping.")
+                traces.append(StepTrace(
+                    name="AppSec Agent (OODA)",
+                    tools_used={},
+                    summary="Skipped (no security-relevant files)",
+                    status="skipped",
+                ))
+            else:
+                tool_results, agent_analysis, analyzer_tools = (
+                    self._run_analyzer(ctx, triage)
+                )
+                raw_count = sum(len(tr.findings) for tr in tool_results)
+                confirmed_count = len(agent_analysis.get("confirmed", []))
+                traces.append(StepTrace(
+                    name="AppSec Agent (OODA)",
+                    tools_used=analyzer_tools,
+                    summary=f"{raw_count} raw -> {confirmed_count} confirmed",
+                    status="success",
+                ))
         except Exception:
             traces.append(StepTrace(
                 name="AppSec Agent (OODA)", tools_used={},
@@ -91,7 +107,10 @@ class DecisionEngine:
 
         print("::group::Smart Gate")
         try:
-            decision = self._apply_gate(ctx, triage, tool_results, agent_analysis)
+            decision = self._apply_gate(
+                ctx, triage, tool_results, agent_analysis,
+                triage_skip=triage_skip,
+            )
             traces.append(StepTrace(
                 name="Smart Gate",
                 tools_used={},
@@ -535,6 +554,8 @@ class DecisionEngine:
         triage: dict,
         tool_results: list[ToolResult],
         agent_analysis: dict,
+        *,
+        triage_skip: bool = False,
     ) -> Decision:
         """Smart gate: confirmed-based verdicts with safety net.
 
@@ -546,6 +567,7 @@ class DecisionEngine:
         - Fail-secure: empty/unparseable analysis → fallback to raw
 
         Enforce mode policy:
+        - Triage skip (no code files) → ALLOWED
         - Safety net triggered → MANUAL_REVIEW (agent dismissed HIGH/CRIT)
         - Confirmed CRITICAL → BLOCKED
         - Confirmed any → MANUAL_REVIEW (human decides with full report)
@@ -553,6 +575,25 @@ class DecisionEngine:
         - Tool failure → MANUAL_REVIEW
         """
         ai_reason = triage.get("reason", "")
+
+        # Intentional skip: triage says no security-relevant files changed.
+        # Only valid when there are truly no findings (safety net).
+        if triage_skip:
+            has_raw = any(f for tr in tool_results for f in tr.findings)
+            if not has_raw:
+                return Decision(
+                    verdict=Verdict.ALLOWED,
+                    continue_pipeline=True,
+                    max_severity=Severity.NONE,
+                    selected_tools=[],
+                    reason=(
+                        f"No security-relevant files changed. "
+                        f"Triage: {ai_reason}"
+                    ),
+                    mode=ctx.mode,
+                )
+            # If raw findings exist despite skip (shouldn't happen),
+            # fall through to normal processing as safety net.
 
         # Aggregate RAW findings from all tool results
         raw_findings: list[Finding] = []

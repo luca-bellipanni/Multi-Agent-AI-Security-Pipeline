@@ -74,14 +74,15 @@ class TestParseTriageNewFormat:
         assert "javascript" in result["context"]["languages"]
         assert result["context"]["has_iac_changes"] is True
 
-    def test_empty_agents_defaults_to_appsec(self):
+    def test_explicit_empty_agents_accepted(self):
+        """Triage explicitly says no agents needed (e.g., docs-only PR)."""
         response = json.dumps({
-            "context": {"languages": ["python"]},
+            "context": {"languages": [], "change_summary": "Docs only"},
             "recommended_agents": [],
-            "reason": "test",
+            "reason": "Only .md files changed, no code to scan",
         })
         result = parse_triage_response(response)
-        assert result["recommended_agents"] == ["appsec"]
+        assert result["recommended_agents"] == []
 
     def test_missing_agents_field_defaults_to_appsec(self):
         response = json.dumps({
@@ -153,6 +154,27 @@ class TestParseTriageNewFormat:
         )
         result = parse_triage_response(response)
         assert result["context"]["languages"] == ["python"]
+
+    def test_empty_agents_only_strings_filtered_defaults_to_appsec(self):
+        """If all entries are non-string, and field is present, result is []."""
+        response = json.dumps({
+            "context": {"languages": []},
+            "recommended_agents": [123, None, False],
+            "reason": "test",
+        })
+        result = parse_triage_response(response)
+        # Field present but all entries filtered → treated as explicit empty
+        assert result["recommended_agents"] == []
+
+    def test_agents_with_unknown_agent_preserved(self):
+        """Unknown agent names are kept (future-proofing)."""
+        response = json.dumps({
+            "context": {"languages": []},
+            "recommended_agents": ["sca"],
+            "reason": "dependency-only change",
+        })
+        result = parse_triage_response(response)
+        assert result["recommended_agents"] == ["sca"]
 
 
 # ── Backward compatibility: old format ───────────────────────────────
@@ -299,3 +321,11 @@ class TestTriageSystemPrompt:
 
     def test_prompt_mentions_risk_areas(self):
         assert "risk_areas" in TRIAGE_SYSTEM_PROMPT
+
+    def test_prompt_allows_empty_agents(self):
+        """Prompt teaches triage that [] is valid for non-code PRs."""
+        assert '"recommended_agents": []' in TRIAGE_SYSTEM_PROMPT
+
+    def test_prompt_prefers_false_positives(self):
+        """Prompt says: if in doubt, recommend appsec."""
+        assert "false positives are better" in TRIAGE_SYSTEM_PROMPT.lower()

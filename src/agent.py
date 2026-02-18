@@ -43,6 +43,13 @@ YOUR JOB:
 Available security agents:
 - appsec: Static analysis specialist (SAST). Invoke when source code changed.
 
+If the PR changes ONLY non-code files (documentation, README, images, .md,
+.txt, .csv, LICENSE, .gitignore), respond with "recommended_agents": [].
+These files cannot contain executable vulnerabilities.
+
+If in DOUBT, always recommend ["appsec"] — false positives are better than
+missed vulnerabilities.
+
 Respond with ONLY a JSON object, no other text:
 {
   "context": {
@@ -169,9 +176,12 @@ def parse_triage_response(response: str) -> dict:
         }
 
         agents = []
-        if isinstance(data.get("recommended_agents"), list):
+        has_agents_field = "recommended_agents" in data
+        if has_agents_field and isinstance(data["recommended_agents"], list):
             agents = [a for a in data["recommended_agents"] if isinstance(a, str)]
-        if not agents:
+        # Empty list is valid ONLY if the field was explicitly present in JSON.
+        # Missing field or non-list → default to appsec (fail-secure).
+        if not agents and not has_agents_field:
             agents = ["appsec"]
 
         reason = data.get("reason", "No reason provided.")
