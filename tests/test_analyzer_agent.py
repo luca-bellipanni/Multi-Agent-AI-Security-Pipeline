@@ -467,3 +467,34 @@ class TestAnalyzerAgentVerbosity:
         create_analyzer_agent("key", "model-id")
         call_kwargs = mock_agent.call_args
         assert call_kwargs.kwargs.get("verbosity_level") == LogLevel.OFF
+
+
+# ── Observability: step_callbacks + LLM timeout ─────────────────────
+
+
+class TestAnalyzerAgentObservability:
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_step_callbacks_forwarded(self, mock_agent, mock_model):
+        """step_callbacks parameter forwarded to CodeAgent."""
+        cb = lambda step, **kw: None  # noqa: E731
+        create_analyzer_agent("key", "model-id", step_callbacks=[cb])
+        call_kwargs = mock_agent.call_args.kwargs
+        assert call_kwargs["step_callbacks"] == [cb]
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_step_callbacks_default_none(self, mock_agent, mock_model):
+        """Without step_callbacks, None is passed."""
+        create_analyzer_agent("key", "model-id")
+        call_kwargs = mock_agent.call_args.kwargs
+        assert call_kwargs.get("step_callbacks") is None
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_llm_timeout_set(self, mock_agent, mock_model):
+        """LiteLLMModel created with timeout=120 for analyzer."""
+        create_analyzer_agent("key", "model-id")
+        call_kwargs = mock_model.call_args.kwargs
+        assert call_kwargs["timeout"] == 120

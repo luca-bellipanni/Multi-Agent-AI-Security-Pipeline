@@ -406,3 +406,34 @@ class TestTriageAgentVerbosity:
         create_triage_agent("key", "model")
         call_kwargs = mock_code_agent.call_args
         assert call_kwargs.kwargs.get("verbosity_level") == LogLevel.OFF
+
+
+# ── Observability: step_callbacks + LLM timeout ─────────────────────
+
+
+class TestTriageAgentObservability:
+
+    @patch("src.agent.LiteLLMModel")
+    @patch("src.agent.CodeAgent")
+    def test_step_callbacks_forwarded(self, mock_code_agent, mock_model):
+        """step_callbacks parameter forwarded to CodeAgent."""
+        cb = lambda step, **kw: None  # noqa: E731
+        create_triage_agent("key", "model", step_callbacks=[cb])
+        call_kwargs = mock_code_agent.call_args.kwargs
+        assert call_kwargs["step_callbacks"] == [cb]
+
+    @patch("src.agent.LiteLLMModel")
+    @patch("src.agent.CodeAgent")
+    def test_step_callbacks_default_none(self, mock_code_agent, mock_model):
+        """Without step_callbacks, None is passed."""
+        create_triage_agent("key", "model")
+        call_kwargs = mock_code_agent.call_args.kwargs
+        assert call_kwargs.get("step_callbacks") is None
+
+    @patch("src.agent.LiteLLMModel")
+    @patch("src.agent.CodeAgent")
+    def test_llm_timeout_set(self, mock_code_agent, mock_model):
+        """LiteLLMModel created with timeout=30 for triage."""
+        create_triage_agent("key", "model")
+        call_kwargs = mock_model.call_args.kwargs
+        assert call_kwargs["timeout"] == 30

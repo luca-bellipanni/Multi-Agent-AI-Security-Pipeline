@@ -128,18 +128,21 @@ def create_analyzer_agent(
     api_key: str,
     model_id: str,
     tools: list | None = None,
+    step_callbacks: list | None = None,
 ) -> CodeAgent:
     """Create an AppSec Agent with security tools."""
     model = LiteLLMModel(
         model_id=model_id,
         api_key=api_key,
         temperature=0.1,
+        timeout=120,
     )
     agent = CodeAgent(
         tools=tools or [],
         model=model,
         max_steps=10,
         verbosity_level=LogLevel.OFF,
+        step_callbacks=step_callbacks,
     )
     agent.prompt_templates["system_prompt"] += "\n\n" + ANALYZER_SYSTEM_PROMPT
     return agent

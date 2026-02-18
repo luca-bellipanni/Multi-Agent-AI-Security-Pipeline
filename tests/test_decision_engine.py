@@ -1747,6 +1747,79 @@ class TestAnalyzerDiagnosticsPrint:
             assert "Workspace: /github/workspace" in out
 
 
+# --- B3b: Observability — step callbacks wired ---
+
+
+class TestObservabilityWiring:
+    """Tests that decision_engine passes step callbacks to agents."""
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.observability.make_step_logger")
+    @patch("src.agent.run_triage")
+    @patch("src.agent.create_triage_agent")
+    def test_triage_passes_step_callback(
+        self, mock_create, mock_run, mock_logger,
+    ):
+        """_run_triage creates and passes step callback to triage agent."""
+        mock_cb = MagicMock()
+        mock_logger.return_value = mock_cb
+        mock_run.return_value = _make_triage()
+
+        with patch("src.tools.FetchPRFilesTool"):
+            engine = DecisionEngine()
+            engine._run_triage(_make_context())
+
+        mock_logger.assert_called_once()
+        call_args = mock_logger.call_args
+        assert call_args[0][0] == "Triage"  # agent_name
+        assert call_args[1]["max_seconds"] == 120
+
+        mock_create.assert_called_once()
+        create_kwargs = mock_create.call_args[1]
+        assert create_kwargs["step_callbacks"] == [mock_cb]
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.observability.make_step_logger")
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_analyzer_passes_step_callback(
+        self, mock_create, mock_run, mock_logger, capsys,
+    ):
+        """_run_analyzer creates and passes step callback to analyzer agent."""
+        mock_cb = MagicMock()
+        mock_logger.return_value = mock_cb
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 0
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st.workspace_path = "/test"
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine = DecisionEngine()
+            engine._run_analyzer(_make_context(), _make_triage())
+
+        mock_logger.assert_called_once()
+        call_args = mock_logger.call_args
+        assert call_args[0][0] == "AppSec"
+        assert call_args[1]["max_seconds"] == 600
+
+        mock_create.assert_called_once()
+        create_kwargs = mock_create.call_args[1]
+        assert create_kwargs["step_callbacks"] == [mock_cb]
+
+
 # --- B4: Smart Gate always-visible summary ---
 
 class TestSmartGateSummaryPrint:

@@ -162,6 +162,7 @@ class DecisionEngine:
         try:
             from src.agent import create_triage_agent, run_triage
             from src.tools import FetchPRFilesTool
+            from src.observability import make_step_logger
 
             print(f"Running AI triage (model: {model_id})...")
 
@@ -174,7 +175,11 @@ class DecisionEngine:
                 )
                 tools.append(fetch_tool)
 
-            agent = create_triage_agent(api_key, model_id, tools=tools)
+            callback = make_step_logger("Triage", max_seconds=120)
+            agent = create_triage_agent(
+                api_key, model_id, tools=tools,
+                step_callbacks=[callback],
+            )
             result = run_triage(agent, ctx)
             print(f"AI triage complete: {result['reason']}")
 
@@ -237,6 +242,7 @@ class DecisionEngine:
         try:
             from src.analyzer_agent import create_analyzer_agent, run_analyzer
             from src.tools import FetchPRDiffTool, SemgrepTool
+            from src.observability import make_step_logger
 
             print("Running AppSec Agent (OODA loop)...")
 
@@ -254,8 +260,10 @@ class DecisionEngine:
                 )
                 tools.append(diff_tool)
 
+            callback = make_step_logger("AppSec", max_seconds=600)
             agent = create_analyzer_agent(
                 api_key, model_id, tools=tools,
+                step_callbacks=[callback],
             )
             analysis = run_analyzer(agent, triage)
             print(f"AppSec Agent complete: {analysis.get('summary', 'N/A')}")
