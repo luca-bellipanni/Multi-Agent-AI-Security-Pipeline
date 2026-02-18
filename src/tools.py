@@ -600,7 +600,7 @@ class SemgrepTool(Tool):
             return "", f"Error: Semgrep timed out after {self.timeout} seconds."
 
         if not result.stdout.strip():
-            stderr_preview = result.stderr[:500] if result.stderr else "no output"
+            stderr_preview = result.stderr[:2000] if result.stderr else "no output"
             return "", f"Error: Semgrep produced no output. stderr: {stderr_preview}"
 
         return result.stdout, None

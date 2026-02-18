@@ -33,6 +33,7 @@ Security (llm-security/output-handling — LLM05):
 import json
 
 from smolagents import CodeAgent, LiteLLMModel
+from smolagents.monitoring import LogLevel
 
 
 ANALYZER_SYSTEM_PROMPT = """\
@@ -138,6 +139,7 @@ def create_analyzer_agent(
         tools=tools or [],
         model=model,
         max_steps=10,
+        verbosity_level=LogLevel.OFF,
     )
     agent.prompt_templates["system_prompt"] += "\n\n" + ANALYZER_SYSTEM_PROMPT
     return agent
@@ -188,8 +190,8 @@ def build_analyzer_task(triage_result: dict) -> str:
     return "\n".join(parts)
 
 
-def parse_analyzer_response(response: str) -> dict:
-    """Parse the AppSec Agent's JSON response.
+def parse_analyzer_response(response) -> dict:
+    """Parse the AppSec Agent's response (dict or JSON string).
 
     Returns a dict with 'confirmed', 'dismissed', 'summary',
     'findings_analyzed', 'rulesets_used', 'rulesets_rationale',
@@ -213,19 +215,20 @@ def parse_analyzer_response(response: str) -> dict:
         "risk_assessment": "",
     }
 
-    if not response or not isinstance(response, str):
-        return default
-
-    text = response.strip()
-
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start == -1 or end == 0:
-        return default
-
-    try:
-        data = json.loads(text[start:end])
-    except json.JSONDecodeError:
+    # agent.run() returns a dict directly via final_answer()
+    if isinstance(response, dict):
+        data = response
+    elif isinstance(response, str) and response.strip():
+        text = response.strip()
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start == -1 or end == 0:
+            return default
+        try:
+            data = json.loads(text[start:end])
+        except json.JSONDecodeError:
+            return default
+    else:
         return default
 
     result = {
@@ -294,4 +297,4 @@ def run_analyzer(agent: CodeAgent, triage_result: dict) -> dict:
     """Run the AppSec Agent and return parsed results."""
     task = build_analyzer_task(triage_result)
     response = agent.run(task)
-    return parse_analyzer_response(str(response))
+    return parse_analyzer_response(response)

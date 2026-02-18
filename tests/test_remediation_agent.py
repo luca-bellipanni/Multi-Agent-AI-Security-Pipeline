@@ -3,9 +3,12 @@
 Tests system prompt security properties, task builder, and agent creation.
 """
 
+from unittest.mock import patch, MagicMock
+
 from src.remediation_agent import (
     REMEDIATION_SYSTEM_PROMPT,
     build_remediation_task,
+    create_remediation_agent,
 )
 
 
@@ -106,3 +109,16 @@ class TestBuildRemediationTask:
         assert "Start by reading the file" in task
         assert "one at a time" in task
         assert "apply_fix" in task
+
+
+# --- Verbosity ---
+
+class TestRemediationAgentVerbosity:
+
+    @patch("src.remediation_agent.LiteLLMModel")
+    @patch("src.remediation_agent.CodeAgent")
+    def test_verbosity_off(self, mock_agent, mock_model):
+        from smolagents.monitoring import LogLevel
+        create_remediation_agent("key", "model-id", tools=[])
+        call_kwargs = mock_agent.call_args
+        assert call_kwargs.kwargs.get("verbosity_level") == LogLevel.OFF

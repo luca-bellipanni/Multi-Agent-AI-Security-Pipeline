@@ -13,6 +13,7 @@ specific tool rulesets — that is the specialist's job.
 import json
 
 from smolagents import CodeAgent, LiteLLMModel
+from smolagents.monitoring import LogLevel
 
 from src.github_context import GitHubContext
 
@@ -91,6 +92,7 @@ def create_triage_agent(
         tools=tools or [],
         model=model,
         max_steps=3,
+        verbosity_level=LogLevel.OFF,
     )
     agent.prompt_templates["system_prompt"] += "\n\n" + TRIAGE_SYSTEM_PROMPT
     return agent
@@ -121,8 +123,8 @@ def build_triage_task(ctx: GitHubContext) -> str:
     return "\n".join(parts)
 
 
-def parse_triage_response(response: str) -> dict:
-    """Parse the triage agent's JSON response.
+def parse_triage_response(response) -> dict:
+    """Parse the triage agent's response (dict or JSON string).
 
     New format:
       context: {languages, files_changed, risk_areas, ...}
@@ -146,19 +148,20 @@ def parse_triage_response(response: str) -> dict:
         "reason": "AI response could not be parsed, using default agent.",
     }
 
-    if not response or not isinstance(response, str):
-        return default
-
-    text = response.strip()
-
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start == -1 or end == 0:
-        return default
-
-    try:
-        data = json.loads(text[start:end])
-    except json.JSONDecodeError:
+    # agent.run() returns a dict directly via final_answer()
+    if isinstance(response, dict):
+        data = response
+    elif isinstance(response, str) and response.strip():
+        text = response.strip()
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start == -1 or end == 0:
+            return default
+        try:
+            data = json.loads(text[start:end])
+        except json.JSONDecodeError:
+            return default
+    else:
         return default
 
     # New format: context + recommended_agents
@@ -226,4 +229,4 @@ def run_triage(agent: CodeAgent, ctx: GitHubContext) -> dict:
     """Run the triage agent and return parsed results."""
     task = build_triage_task(ctx)
     response = agent.run(task)
-    return parse_triage_response(str(response))
+    return parse_triage_response(response)

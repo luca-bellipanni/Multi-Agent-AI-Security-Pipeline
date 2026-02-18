@@ -329,3 +329,80 @@ class TestTriageSystemPrompt:
     def test_prompt_prefers_false_positives(self):
         """Prompt says: if in doubt, recommend appsec."""
         assert "false positives are better" in TRIAGE_SYSTEM_PROMPT.lower()
+
+
+# ── Dict input (agent.run returns dict via final_answer) ─────────────
+
+
+class TestParseTriageDictInput:
+    """Parser accepts dict input directly (from agent.run final_answer)."""
+
+    def test_dict_full_new_format(self):
+        response = {
+            "context": {
+                "languages": ["python"],
+                "files_changed": 3,
+                "risk_areas": ["authentication"],
+                "has_dependency_changes": False,
+                "has_iac_changes": False,
+                "change_summary": "Auth changes",
+            },
+            "recommended_agents": ["appsec"],
+            "reason": "Python code changed",
+        }
+        result = parse_triage_response(response)
+        assert result["context"]["languages"] == ["python"]
+        assert result["context"]["files_changed"] == 3
+        assert result["recommended_agents"] == ["appsec"]
+        assert result["reason"] == "Python code changed"
+
+    def test_dict_empty_agents_accepted(self):
+        response = {
+            "context": {
+                "languages": [],
+                "files_changed": 1,
+                "risk_areas": [],
+                "has_dependency_changes": False,
+                "has_iac_changes": False,
+                "change_summary": "Docs only",
+            },
+            "recommended_agents": [],
+            "reason": "No code files",
+        }
+        result = parse_triage_response(response)
+        assert result["recommended_agents"] == []
+
+    def test_dict_missing_agents_field_defaults_to_appsec(self):
+        response = {
+            "context": {
+                "languages": ["python"],
+                "files_changed": 1,
+                "risk_areas": [],
+            },
+        }
+        result = parse_triage_response(response)
+        assert result["recommended_agents"] == ["appsec"]
+
+    def test_empty_dict_returns_default(self):
+        result = parse_triage_response({})
+        assert result["recommended_agents"] == ["appsec"]
+        assert "could not be parsed" in result["reason"].lower()
+
+    def test_dict_backward_compat_recommended_tools(self):
+        response = {"recommended_tools": ["semgrep"], "reason": "legacy"}
+        result = parse_triage_response(response)
+        assert result["recommended_agents"] == ["appsec"]
+
+
+# ── Verbosity (LogLevel.OFF) ─────────────────────────────────────────
+
+
+class TestTriageAgentVerbosity:
+
+    @patch("src.agent.LiteLLMModel")
+    @patch("src.agent.CodeAgent")
+    def test_verbosity_off(self, mock_code_agent, mock_model):
+        from smolagents.monitoring import LogLevel
+        create_triage_agent("key", "model")
+        call_kwargs = mock_code_agent.call_args
+        assert call_kwargs.kwargs.get("verbosity_level") == LogLevel.OFF

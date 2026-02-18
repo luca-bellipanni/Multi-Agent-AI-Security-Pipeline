@@ -404,3 +404,66 @@ class TestRunAnalyzer:
         mock_agent.run.return_value = 42
         result = run_analyzer(mock_agent, _make_triage())
         assert result["confirmed"] == []
+
+    def test_handles_dict_agent_response(self):
+        """agent.run() returns dict directly via final_answer()."""
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = {
+            "findings_analyzed": 2,
+            "confirmed": [{"rule_id": "r.1", "severity": "HIGH",
+                           "path": "a.py", "line": 1, "reason": "bad"}],
+            "dismissed": [],
+            "summary": "one issue",
+        }
+        result = run_analyzer(mock_agent, _make_triage())
+        assert result["findings_analyzed"] == 2
+        assert len(result["confirmed"]) == 1
+
+
+# ── Dict input to parser ────────────────────────────────────────────
+
+
+class TestParseAnalyzerDictInput:
+    """Parser accepts dict input directly (from agent.run final_answer)."""
+
+    def test_dict_full_response(self):
+        response = {
+            "rulesets_used": ["p/security-audit"],
+            "rulesets_rationale": "Python code",
+            "findings_analyzed": 2,
+            "confirmed": [{"rule_id": "python.exec", "severity": "HIGH",
+                           "path": "app.py", "line": 10, "reason": "exec"}],
+            "dismissed": [],
+            "summary": "One issue found.",
+            "risk_assessment": "High",
+        }
+        result = parse_analyzer_response(response)
+        assert result["findings_analyzed"] == 2
+        assert len(result["confirmed"]) == 1
+        assert result["rulesets_used"] == ["p/security-audit"]
+        assert result["summary"] == "One issue found."
+
+    def test_dict_empty_response(self):
+        result = parse_analyzer_response({})
+        assert result["confirmed"] == []
+        assert result["summary"] == "No summary provided."
+
+    def test_dict_no_confirmed(self):
+        response = {"summary": "clean", "dismissed": [], "findings_analyzed": 0}
+        result = parse_analyzer_response(response)
+        assert result["confirmed"] == []
+        assert result["summary"] == "clean"
+
+
+# ── Verbosity ────────────────────────────────────────────────────────
+
+
+class TestAnalyzerAgentVerbosity:
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_verbosity_off(self, mock_agent, mock_model):
+        from smolagents.monitoring import LogLevel
+        create_analyzer_agent("key", "model-id")
+        call_kwargs = mock_agent.call_args
+        assert call_kwargs.kwargs.get("verbosity_level") == LogLevel.OFF
