@@ -33,7 +33,6 @@ Security (llm-security/output-handling — LLM05):
 import json
 
 from smolagents import CodeAgent, LiteLLMModel
-from smolagents.agents import EMPTY_PROMPT_TEMPLATES
 
 
 ANALYZER_SYSTEM_PROMPT = """\
@@ -104,7 +103,7 @@ FALSE POSITIVE CRITERIA (use ONLY these):
 - Rule is informational (INFO severity) and pattern is common/expected
 Do NOT dismiss findings for any other reason.
 
-Respond with ONLY a JSON object, no other text:
+When your analysis is complete, call final_answer() with a dict containing these keys:
 {
   "rulesets_used": ["p/security-audit", "p/python"],
   "rulesets_rationale": "Python source code with auth changes",
@@ -135,12 +134,13 @@ def create_analyzer_agent(
         api_key=api_key,
         temperature=0.1,
     )
-    return CodeAgent(
+    agent = CodeAgent(
         tools=tools or [],
         model=model,
-        prompt_templates={**EMPTY_PROMPT_TEMPLATES, "system_prompt": ANALYZER_SYSTEM_PROMPT},
         max_steps=10,
     )
+    agent.prompt_templates["system_prompt"] += "\n\n" + ANALYZER_SYSTEM_PROMPT
+    return agent
 
 
 def build_analyzer_task(triage_result: dict) -> str:

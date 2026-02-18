@@ -10,7 +10,6 @@ Security (LLM06): tools have workspace injection and scope lock.
 """
 
 from smolagents import CodeAgent, LiteLLMModel
-from smolagents.agents import EMPTY_PROMPT_TEMPLATES
 
 
 REMEDIATION_SYSTEM_PROMPT = """\
@@ -79,12 +78,13 @@ def create_remediation_agent(
         api_key=api_key,
         temperature=0.1,
     )
-    return CodeAgent(
+    agent = CodeAgent(
         tools=tools,
         model=model,
-        prompt_templates={**EMPTY_PROMPT_TEMPLATES, "system_prompt": REMEDIATION_SYSTEM_PROMPT},
         max_steps=15,
     )
+    agent.prompt_templates["system_prompt"] += "\n\n" + REMEDIATION_SYSTEM_PROMPT
+    return agent
 
 
 def build_remediation_task(file_path: str, findings: list[dict]) -> str:
