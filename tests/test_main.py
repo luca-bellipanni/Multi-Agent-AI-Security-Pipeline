@@ -282,3 +282,119 @@ class TestCommandDispatch:
         mock_engine_cls.return_value = engine
 
         assert main() == 0
+
+
+# --- B5: analysis_report NOT printed in Results ---
+
+class TestResultsNoBloat:
+
+    @patch("src.main.write_outputs")
+    @patch("src.main.DecisionEngine")
+    @patch("src.main.GitHubContext.from_environment")
+    def test_analysis_report_not_printed(self, mock_ctx, mock_engine_cls, mock_write, capsys):
+        """analysis_report should NOT be printed in the Results section."""
+        ctx = MagicMock()
+        ctx.mode = "shadow"
+        ctx.is_pull_request = False
+        ctx.pr_number = None
+        mock_ctx.return_value = ctx
+
+        decision = Decision(
+            verdict=Verdict.ALLOWED,
+            continue_pipeline=True,
+            max_severity=Severity.NONE,
+            selected_tools=["semgrep"],
+            reason="Clean",
+            mode="shadow",
+            analysis_report="## Detailed Analysis\nLots of text here",
+        )
+        engine = MagicMock()
+        engine.decide.return_value = decision
+        mock_engine_cls.return_value = engine
+
+        main()
+        out = capsys.readouterr().out
+        assert "Detailed Analysis" not in out
+        assert "Lots of text here" not in out
+        # But Decision/Findings/Reason should still be there
+        assert "Decision: allowed" in out
+        assert "Findings: 0" in out
+
+
+# --- B6: PR link printed ---
+
+class TestPRLink:
+
+    @patch("src.main.write_outputs")
+    @patch("src.main.DecisionEngine")
+    @patch("src.main.GitHubContext.from_environment")
+    def test_pr_link_printed(self, mock_ctx, mock_engine_cls, mock_write, capsys):
+        """PR URL is printed after posting the comment."""
+        ctx = MagicMock()
+        ctx.mode = "shadow"
+        ctx.is_pull_request = True
+        ctx.pr_number = 7
+        ctx.token = "fake-token"
+        ctx.repository = "myorg/myrepo"
+        ctx.workspace = "/tmp/ws"
+        mock_ctx.return_value = ctx
+
+        decision = Decision(
+            verdict=Verdict.ALLOWED,
+            continue_pipeline=True,
+            max_severity=Severity.NONE,
+            selected_tools=["semgrep"],
+            reason="Clean",
+            mode="shadow",
+        )
+        engine = MagicMock()
+        engine.decide.return_value = decision
+        mock_engine_cls.return_value = engine
+
+        with patch("src.pr_reporter.format_comment") as mock_format, \
+             patch("src.pr_reporter.post_comment") as mock_post, \
+             patch("src.scan_results.build_scan_results") as mock_build, \
+             patch("src.scan_results.write_scan_results") as mock_write_sr:
+            mock_build.return_value = MagicMock()
+            mock_write_sr.return_value = "/tmp/ws/.appsec/scan-results.json"
+            mock_format.return_value = "body"
+
+            main()
+            out = capsys.readouterr().out
+            assert "https://github.com/myorg/myrepo/pull/7" in out
+
+    @patch("src.main.write_outputs")
+    @patch("src.main.DecisionEngine")
+    @patch("src.main.GitHubContext.from_environment")
+    def test_no_link_without_token(self, mock_ctx, mock_engine_cls, mock_write, capsys):
+        """No PR link when token is missing."""
+        ctx = MagicMock()
+        ctx.mode = "shadow"
+        ctx.is_pull_request = True
+        ctx.pr_number = 7
+        ctx.token = ""
+        ctx.repository = "myorg/myrepo"
+        ctx.workspace = "/tmp/ws"
+        mock_ctx.return_value = ctx
+
+        decision = Decision(
+            verdict=Verdict.ALLOWED,
+            continue_pipeline=True,
+            max_severity=Severity.NONE,
+            selected_tools=["semgrep"],
+            reason="Clean",
+            mode="shadow",
+        )
+        engine = MagicMock()
+        engine.decide.return_value = decision
+        mock_engine_cls.return_value = engine
+
+        with patch("src.scan_results.build_scan_results") as mock_build, \
+             patch("src.scan_results.write_scan_results") as mock_write_sr:
+            mock_build.return_value = MagicMock()
+            mock_write_sr.return_value = "/tmp/ws/.appsec/scan-results.json"
+
+            main()
+            out = capsys.readouterr().out
+            assert "https://github.com" not in out
+            assert "No GitHub token" in out

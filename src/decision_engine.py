@@ -26,6 +26,14 @@ from src.models import (
 from src.github_context import GitHubContext
 from src.memory import MemoryStore
 
+# Suppress LiteLLM "Give Feedback" / "_turn_on_debug()" console spam.
+# Only cosmetic — LLM errors still propagate as exceptions.
+try:
+    import litellm
+    litellm.suppress_debug_info = True
+except ImportError:
+    pass
+
 
 _EMPTY_ANALYSIS = {
     "confirmed": [],
@@ -170,6 +178,13 @@ class DecisionEngine:
             result = run_triage(agent, ctx)
             print(f"AI triage complete: {result['reason']}")
 
+            # Context summary for CI readability
+            triage_ctx = result.get("context", {})
+            files = triage_ctx.get("files_changed", 0)
+            langs = ", ".join(triage_ctx.get("languages", [])) or "unknown"
+            risks = ", ".join(triage_ctx.get("risk_areas", [])) or "none detected"
+            print(f"  {files} file(s) | {langs} | risk: {risks}")
+
             tools_used: dict[str, int] = {}
             if fetch_tool is not None and fetch_tool._call_count > 0:
                 tools_used["fetch_pr_files"] = fetch_tool._call_count
@@ -244,6 +259,32 @@ class DecisionEngine:
             )
             analysis = run_analyzer(agent, triage)
             print(f"AppSec Agent complete: {analysis.get('summary', 'N/A')}")
+
+            # Semgrep diagnostics
+            print(f"  Semgrep: {semgrep_tool._call_count} scan(s), "
+                  f"{len(semgrep_tool._all_raw_findings)} finding(s)")
+            if semgrep_tool._all_scan_errors:
+                print(f"  Semgrep errors "
+                      f"({len(semgrep_tool._all_scan_errors)}):")
+                for e in semgrep_tool._all_scan_errors[:3]:
+                    msg = (e.get("message", str(e))
+                           if isinstance(e, dict) else str(e))
+                    print(f"    - {msg[:200]}")
+            if diff_tool is not None and diff_tool._call_count > 0:
+                print(f"  Diff: {diff_tool._call_count} call(s)")
+
+            # Agent findings table
+            confirmed = analysis.get("confirmed", [])
+            dismissed = analysis.get("dismissed", [])
+            if confirmed or dismissed:
+                print(f"\n  Agent findings ({len(confirmed)} confirmed, "
+                      f"{len(dismissed)} dismissed):")
+                for c in confirmed:
+                    sev = c.get("severity", "?").upper()
+                    rule = c.get("rule_id", "?")
+                    path = c.get("path", "?")
+                    line = c.get("line", "?")
+                    print(f"    [{sev:<8s}] {rule} — {path}:{line}")
 
             # CUMULATIVE SIDE CHANNEL: read ALL findings from ALL tool calls
             raw_findings = semgrep_tool._all_raw_findings
@@ -677,6 +718,18 @@ class DecisionEngine:
 
         findings_count = len(effective_findings)
 
+        # Smart Gate summary (always visible in CI logs)
+        raw_count = len(raw_findings)
+        agent_confirmed_count = len(agent_analysis.get("confirmed", []))
+        print(f"  Scanner: {raw_count} raw finding(s)")
+        if agent_confirmed_count:
+            print(f"  Agent: {agent_confirmed_count} confirmed "
+                  f"-> {findings_count} validated")
+        if agent_confirmed_count > 0 and findings_count == 0:
+            print(f"  Warning: {agent_confirmed_count} agent finding(s) "
+                  f"not confirmed by scanner")
+        print(f"  Mode: {ctx.mode}")
+
         excepted_count = len(excepted_info)
 
         # Build structured findings lists for PR reporting
@@ -689,11 +742,6 @@ class DecisionEngine:
         # Shadow mode: always allow, but report everything
         if ctx.mode == "shadow":
             raw_count = len(raw_findings)
-            if raw_count > 0:
-                print(
-                    f"[Shadow] {raw_count} raw finding(s), "
-                    f"max severity: {max_raw_severity.value}"
-                )
             return Decision(
                 verdict=Verdict.ALLOWED,
                 continue_pipeline=True,

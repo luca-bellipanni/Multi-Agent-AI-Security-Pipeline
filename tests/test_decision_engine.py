@@ -1450,3 +1450,288 @@ class TestExecutionTrace:
         analyzer_trace = [t for t in decision.trace if "OODA" in t.name][0]
         assert analyzer_trace.tools_used == {"run_semgrep": 2, "fetch_pr_diff": 1}
         assert "1 raw" in analyzer_trace.summary
+
+
+# --- B2: Triage context summary print ---
+
+class TestTriageContextSummary:
+    """Tests for the triage context one-liner printed after AI triage."""
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.agent.run_triage")
+    @patch("src.agent.create_triage_agent")
+    def test_prints_context_summary(self, mock_agent, mock_run, capsys):
+        mock_run.return_value = _make_triage(
+            context={
+                "languages": ["python", "javascript"],
+                "files_changed": 5,
+                "risk_areas": ["authentication", "api_handlers"],
+                "has_dependency_changes": False,
+                "has_iac_changes": False,
+                "change_summary": "Auth changes",
+            },
+        )
+        engine = DecisionEngine()
+        engine._run_triage(_make_context())
+        out = capsys.readouterr().out
+        assert "5 file(s)" in out
+        assert "python, javascript" in out
+        assert "authentication, api_handlers" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.agent.run_triage")
+    @patch("src.agent.create_triage_agent")
+    def test_empty_context_defaults(self, mock_agent, mock_run, capsys):
+        mock_run.return_value = _make_triage(
+            context={
+                "languages": [],
+                "files_changed": 0,
+                "risk_areas": [],
+                "has_dependency_changes": False,
+                "has_iac_changes": False,
+                "change_summary": "",
+            },
+        )
+        engine = DecisionEngine()
+        engine._run_triage(_make_context())
+        out = capsys.readouterr().out
+        assert "0 file(s)" in out
+        assert "unknown" in out
+        assert "none detected" in out
+
+
+# --- A4 + B3: Semgrep diagnostics + Agent findings table ---
+
+class TestAnalyzerDiagnosticsPrint:
+    """Tests for Semgrep diagnostics and agent findings table in _run_analyzer()."""
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_semgrep_diagnostics_basic(self, mock_agent, mock_run, capsys):
+        """Prints scan count and findings count."""
+        mock_run.return_value = {
+            "confirmed": [],
+            "dismissed": [],
+            "summary": "Clean",
+            "findings_analyzed": 0,
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        triage = _make_triage()
+        ctx = _make_context()
+
+        # Need to mock the tool objects — they're created inside _run_analyzer
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 2
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = ["p/python"]
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 1
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, triage)
+            out = capsys.readouterr().out
+            assert "Semgrep: 2 scan(s), 0 finding(s)" in out
+            assert "Diff: 1 call(s)" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_semgrep_errors_printed(self, mock_agent, mock_run, capsys):
+        """Prints Semgrep scan errors when present."""
+        mock_run.return_value = {
+            "confirmed": [],
+            "dismissed": [],
+            "summary": "Errors occurred",
+            "findings_analyzed": 0,
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        triage = _make_triage()
+        ctx = _make_context()
+
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = [
+                {"message": "Failed to download p/python"},
+                {"message": "Network timeout"},
+            ]
+            mock_st._all_configs_used = []
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, triage)
+            out = capsys.readouterr().out
+            assert "Semgrep errors (2):" in out
+            assert "Failed to download p/python" in out
+            assert "Network timeout" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_agent_findings_table_confirmed(self, mock_agent, mock_run, capsys):
+        """Prints confirmed findings table."""
+        mock_run.return_value = {
+            "confirmed": [
+                {"rule_id": "sql-injection", "severity": "HIGH",
+                 "path": "app.py", "line": 12},
+                {"rule_id": "xss", "severity": "MEDIUM",
+                 "path": "app.py", "line": 26},
+            ],
+            "dismissed": [],
+            "summary": "Found issues",
+            "findings_analyzed": 2,
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        triage = _make_triage()
+        ctx = _make_context()
+
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, triage)
+            out = capsys.readouterr().out
+            assert "Agent findings (2 confirmed, 0 dismissed):" in out
+            assert "[HIGH" in out
+            assert "sql-injection" in out
+            assert "app.py:12" in out
+            assert "[MEDIUM" in out
+            assert "xss" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_no_findings_table_when_empty(self, mock_agent, mock_run, capsys):
+        """No findings table when both confirmed and dismissed are empty."""
+        mock_run.return_value = {
+            "confirmed": [],
+            "dismissed": [],
+            "summary": "Clean",
+            "findings_analyzed": 0,
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        triage = _make_triage()
+        ctx = _make_context()
+
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 0
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, triage)
+            out = capsys.readouterr().out
+            assert "Agent findings" not in out
+
+
+# --- B4: Smart Gate always-visible summary ---
+
+class TestSmartGateSummaryPrint:
+    """Tests for the Smart Gate summary printed in _apply_gate()."""
+
+    def _gate(self, findings, analysis, mode="enforce"):
+        engine = DecisionEngine()
+        tr = _make_tool_result(findings)
+        return engine._apply_gate(
+            _make_context(mode=mode), _make_triage(), [tr], analysis,
+        )
+
+    def test_scanner_count_always_printed(self, capsys):
+        """Scanner raw count is always printed."""
+        raw = [_make_finding(Severity.HIGH, rule_id="r1")]
+        self._gate(raw, _empty_analysis(), mode="shadow")
+        out = capsys.readouterr().out
+        assert "Scanner: 1 raw finding(s)" in out
+
+    def test_agent_confirmed_printed(self, capsys):
+        """Agent confirmed -> validated is printed when agent has confirmations."""
+        raw = [_make_finding(Severity.HIGH, rule_id="r1")]
+        analysis = {
+            "confirmed": [{"rule_id": "r1", "severity": "HIGH"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+            "summary": "found",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        self._gate(raw, analysis, mode="enforce")
+        out = capsys.readouterr().out
+        assert "Agent: 1 confirmed" in out
+        assert "validated" in out
+
+    def test_warning_when_agent_finds_but_scanner_empty(self, capsys):
+        """Warning printed when agent confirmed > 0 but validated == 0."""
+        analysis = {
+            "confirmed": [
+                {"rule_id": "ghost1", "severity": "HIGH"},
+                {"rule_id": "ghost2", "severity": "MEDIUM"},
+            ],
+            "dismissed": [],
+            "findings_analyzed": 2,
+            "summary": "found",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        self._gate([], analysis, mode="shadow")
+        out = capsys.readouterr().out
+        assert "Scanner: 0 raw finding(s)" in out
+        assert "Warning: 2 agent finding(s) not confirmed by scanner" in out
+
+    def test_mode_always_printed(self, capsys):
+        """Mode is always printed in the gate summary."""
+        self._gate([], _empty_analysis(), mode="shadow")
+        out = capsys.readouterr().out
+        assert "Mode: shadow" in out
+
+    def test_no_agent_line_when_no_confirmed(self, capsys):
+        """Agent line is NOT printed when no confirmations."""
+        self._gate([], _empty_analysis(), mode="enforce")
+        out = capsys.readouterr().out
+        assert "Agent:" not in out
+
+    def test_zero_raw_zero_agent_no_warning(self, capsys):
+        """No warning when both scanner and agent find nothing."""
+        self._gate([], _empty_analysis(), mode="shadow")
+        out = capsys.readouterr().out
+        assert "Warning:" not in out

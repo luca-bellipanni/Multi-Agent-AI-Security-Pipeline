@@ -463,7 +463,10 @@ def _format_semgrep_findings(raw_json: str) -> str:
         lines.append(f"  [{severity}] {check_id} at {path}:{line} — {message}")
 
     if errors:
-        lines.append(f"\n{len(errors)} scan error(s) occurred.")
+        lines.append(f"\n{len(errors)} scan error(s):")
+        for e in errors[:5]:
+            msg = e.get("message", str(e)) if isinstance(e, dict) else str(e)
+            lines.append(f"  - {msg[:200]}")
 
     return "\n".join(lines)
 
@@ -522,9 +525,11 @@ class SemgrepTool(Tool):
         self._last_raw_findings: list[Finding] = []
         self._last_config_used: list[str] = []
         self._last_error: str = ""
+        self._last_scan_errors: list = []
         # Cumulative across all calls (OODA: agent may call multiple times):
         self._all_raw_findings: list[Finding] = []
         self._all_configs_used: list[str] = []
+        self._all_scan_errors: list = []
         self._call_count: int = 0
         super().__init__(**kwargs)
 
@@ -535,10 +540,11 @@ class SemgrepTool(Tool):
         independently of what the agent reports (LLM05: untrusted output).
         """
         self._call_count += 1
-        # Reset side channel
+        # Reset per-call side channel
         self._last_raw_findings = []
         self._last_config_used = []
         self._last_error = ""
+        self._last_scan_errors = []
 
         rulesets, val_error = _validate_rulesets(config)
         if val_error:
@@ -556,6 +562,15 @@ class SemgrepTool(Tool):
         # Side channel: save raw findings before returning to the agent
         self._last_raw_findings = parse_semgrep_findings(raw_json)
         self._all_raw_findings.extend(self._last_raw_findings)
+
+        # Capture scan errors from Semgrep JSON for diagnostics
+        try:
+            scan_data = json_module.loads(raw_json)
+            self._last_scan_errors = scan_data.get("errors", [])
+            self._all_scan_errors.extend(self._last_scan_errors)
+        except (json_module.JSONDecodeError, TypeError):
+            pass
+
         return _format_semgrep_findings(raw_json)
 
     def run_and_parse(self, config: str) -> tuple[str, list[Finding]]:
@@ -598,6 +613,17 @@ class SemgrepTool(Tool):
             return "", "Error: Semgrep is not installed or not accessible."
         except subprocess.TimeoutExpired:
             return "", f"Error: Semgrep timed out after {self.timeout} seconds."
+
+        # Semgrep exit code: 0=no findings, 1=findings found, 2+=errors
+        if result.returncode > 1:
+            stderr_preview = result.stderr[:2000] if result.stderr else "no output"
+            # Still return stdout if available (may contain partial results + errors)
+            if result.stdout.strip():
+                return result.stdout, None
+            return "", (
+                f"Error: Semgrep failed (exit {result.returncode}). "
+                f"stderr: {stderr_preview}"
+            )
 
         if not result.stdout.strip():
             stderr_preview = result.stderr[:2000] if result.stderr else "no output"

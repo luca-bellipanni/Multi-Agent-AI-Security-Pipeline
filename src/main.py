@@ -40,8 +40,6 @@ def _run_scan(ctx: GitHubContext) -> int:
     print(f"Reason: {decision.reason}")
     if decision.safety_warnings:
         print(f"\n*** {len(decision.safety_warnings)} SAFETY WARNING(S) ***")
-    if decision.analysis_report:
-        print(f"\n{decision.analysis_report}")
     print("::endgroup::")
 
     # Save exception memory (auto-exceptions for next run)
@@ -77,6 +75,9 @@ def _run_scan(ctx: GitHubContext) -> int:
                 post_comment(
                     ctx.token, ctx.repository, ctx.pr_number, body,
                 )
+                pr_url = (f"https://github.com/{ctx.repository}"
+                          f"/pull/{ctx.pr_number}")
+                print(pr_url)
             else:
                 print("No GitHub token, skipping PR comment")
         else:
