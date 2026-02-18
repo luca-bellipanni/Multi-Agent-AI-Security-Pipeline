@@ -93,7 +93,7 @@ def create_triage_agent(
     return CodeAgent(
         tools=tools or [],
         model=model,
-        system_prompt=TRIAGE_SYSTEM_PROMPT,
+        prompt_templates={"system_prompt": TRIAGE_SYSTEM_PROMPT},
         max_steps=3,
     )
 

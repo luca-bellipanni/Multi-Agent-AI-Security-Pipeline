@@ -1,2 +1,2 @@
-smolagents[litellm]>=1.0
+smolagents[litellm]>=1.14.0
 semgrep>=1.50

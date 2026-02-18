@@ -298,7 +298,8 @@ class TestCreateAnalyzerAgent:
     def test_system_prompt_set(self, mock_agent, mock_model):
         create_analyzer_agent("key", "model-id")
         call_kwargs = mock_agent.call_args
-        prompt = call_kwargs.kwargs.get("system_prompt", "")
+        templates = call_kwargs.kwargs.get("prompt_templates", {})
+        prompt = templates.get("system_prompt", "")
         assert "appsec" in prompt.lower() or "security" in prompt.lower()
 
     @patch("src.analyzer_agent.LiteLLMModel")

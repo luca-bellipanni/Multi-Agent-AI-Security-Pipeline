@@ -137,7 +137,7 @@ def create_analyzer_agent(
     return CodeAgent(
         tools=tools or [],
         model=model,
-        system_prompt=ANALYZER_SYSTEM_PROMPT,
+        prompt_templates={"system_prompt": ANALYZER_SYSTEM_PROMPT},
         max_steps=10,
     )
 

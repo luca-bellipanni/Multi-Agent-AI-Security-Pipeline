@@ -81,7 +81,7 @@ def create_remediation_agent(
     return CodeAgent(
         tools=tools,
         model=model,
-        system_prompt=REMEDIATION_SYSTEM_PROMPT,
+        prompt_templates={"system_prompt": REMEDIATION_SYSTEM_PROMPT},
         max_steps=15,
     )
 
