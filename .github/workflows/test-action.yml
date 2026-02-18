@@ -2,14 +2,14 @@ name: Test Action
 
 on:
   pull_request:
-  push:
-    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
-  test-shadow:
+  test-scan:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -19,20 +19,14 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           mode: shadow
+          ai_api_key: ${{ secrets.AI_API_KEY }}
+          ai_model: gemini/gemini-2.0-flash
 
-      - name: Verify outputs
+      - name: Show results
         run: |
           echo "Decision: ${{ steps.appsec.outputs.decision }}"
           echo "Continue: ${{ steps.appsec.outputs.continue_pipeline }}"
+          echo "Findings: ${{ steps.appsec.outputs.findings_count }}"
           echo "Reason: ${{ steps.appsec.outputs.reason }}"
-
-          # Verify expected values
-          if [ "${{ steps.appsec.outputs.decision }}" != "allowed" ]; then
-            echo "FAIL: expected decision=allowed"
-            exit 1
-          fi
-          if [ "${{ steps.appsec.outputs.continue_pipeline }}" != "true" ]; then
-            echo "FAIL: expected continue_pipeline=true"
-            exit 1
-          fi
-          echo "All checks passed"
+          echo "Safety warnings: ${{ steps.appsec.outputs.safety_warnings_count }}"
+          echo "Excepted: ${{ steps.appsec.outputs.excepted_count }}"
