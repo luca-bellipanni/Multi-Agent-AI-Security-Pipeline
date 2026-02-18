@@ -1,8 +1,13 @@
+[![GitHub Actions](https://img.shields.io/badge/GitHub%20Action-available-2088FF?logo=github-actions&logoColor=white)](https://github.com/luca-bellipanni/Multi-Agent-AI-Security-Pipeline)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Tests: 234](https://img.shields.io/badge/tests-234%20passed-brightgreen)](https://github.com/luca-bellipanni/Multi-Agent-AI-Security-Pipeline/tree/main/tests)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/luca-bellipanni/Multi-Agent-AI-Security-Pipeline/pulls)
+
 # Agentic AppSec Pipeline
 
 A GitHub Action that replaces sequential security scanners with a **multi-agent AI system**. AI agents read your code changes, reason about risks, run targeted scans, and propose fixes as Draft PRs — while a deterministic gate ensures no AI manipulation can override the verdict.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
