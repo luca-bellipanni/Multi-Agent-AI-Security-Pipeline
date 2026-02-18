@@ -89,6 +89,7 @@ def create_triage_agent(
         api_key=api_key,
         temperature=0.1,
         timeout=30,
+        num_retries=1,
     )
     agent = CodeAgent(
         tools=tools or [],

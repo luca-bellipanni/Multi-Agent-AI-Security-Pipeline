@@ -532,6 +532,10 @@ class SemgrepTool(Tool):
         self._all_configs_used: list[str] = []
         self._all_scan_errors: list = []
         self._call_count: int = 0
+        # Diagnostics (always captured, regardless of exit code):
+        self._last_cmd: list[str] = []
+        self._last_stderr: str = ""
+        self._last_files_scanned: list[str] = []
         super().__init__(**kwargs)
 
     def forward(self, config: str) -> str:
@@ -564,11 +568,14 @@ class SemgrepTool(Tool):
         self._last_raw_findings = parse_semgrep_findings(raw_json)
         self._all_raw_findings.extend(self._last_raw_findings)
 
-        # Capture scan errors from Semgrep JSON for diagnostics
+        # Capture scan errors + files scanned from Semgrep JSON for diagnostics
         try:
             scan_data = json_module.loads(raw_json)
             self._last_scan_errors = scan_data.get("errors", [])
             self._all_scan_errors.extend(self._last_scan_errors)
+            self._last_files_scanned = scan_data.get("paths", {}).get(
+                "scanned", [],
+            )
         except (json_module.JSONDecodeError, TypeError):
             pass
 
@@ -603,6 +610,9 @@ class SemgrepTool(Tool):
             cmd.extend(["--config", rs])
         cmd.append(self.workspace_path)
 
+        # Diagnostics: always capture command used
+        self._last_cmd = list(cmd)
+
         try:
             result = subprocess.run(
                 cmd,
@@ -614,6 +624,9 @@ class SemgrepTool(Tool):
             return "", "Error: Semgrep is not installed or not accessible."
         except subprocess.TimeoutExpired:
             return "", f"Error: Semgrep timed out after {self.timeout} seconds."
+
+        # Diagnostics: always capture stderr (even on success)
+        self._last_stderr = result.stderr or ""
 
         # Semgrep exit code: 0=no findings, 1=findings found, 2+=errors
         if result.returncode > 1:

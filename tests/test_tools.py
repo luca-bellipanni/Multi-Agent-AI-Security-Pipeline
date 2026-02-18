@@ -1323,3 +1323,108 @@ class TestSemgrepErrorSideChannel:
         tool.forward("/etc/passwd")
         assert tool._last_scan_errors == []
         assert tool._all_scan_errors == []
+
+
+# --- A4: Execute diagnostics (command, stderr, files scanned) ---
+
+
+class TestSemgrepExecuteDiagnostics:
+
+    def test_initial_diagnostic_attrs(self):
+        """New diagnostic attrs start empty."""
+        tool = SemgrepTool(workspace_path="/tmp")
+        assert tool._last_cmd == []
+        assert tool._last_stderr == ""
+        assert tool._last_files_scanned == []
+
+    @patch("src.tools.subprocess.run")
+    def test_last_cmd_populated(self, mock_run):
+        """_execute() populates _last_cmd with the full command."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({
+                "results": [], "errors": [],
+                "paths": {"scanned": ["a.py"]},
+            }),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/ws")
+        tool.forward("p/python")
+        assert tool._last_cmd == [
+            "semgrep", "--json", "--quiet",
+            "--config", "p/python", "/ws",
+        ]
+
+    @patch("src.tools.subprocess.run")
+    def test_last_stderr_captured(self, mock_run):
+        """stderr always captured, even on success."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": [], "paths": {"scanned": []}}),
+            stderr="Some warning from semgrep",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/ws")
+        tool.forward("p/python")
+        assert tool._last_stderr == "Some warning from semgrep"
+
+    @patch("src.tools.subprocess.run")
+    def test_last_stderr_empty_on_clean_run(self, mock_run):
+        """stderr is empty string when semgrep has no stderr output."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": [], "paths": {"scanned": []}}),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/ws")
+        tool.forward("p/python")
+        assert tool._last_stderr == ""
+
+    @patch("src.tools.subprocess.run")
+    def test_files_scanned_captured(self, mock_run):
+        """_last_files_scanned populated from Semgrep JSON paths.scanned."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({
+                "results": [], "errors": [],
+                "paths": {"scanned": ["app.py", "lib/utils.py", "main.py"]},
+            }),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/ws")
+        tool.forward("p/python")
+        assert tool._last_files_scanned == ["app.py", "lib/utils.py", "main.py"]
+
+    @patch("src.tools.subprocess.run")
+    def test_files_scanned_empty_when_no_paths(self, mock_run):
+        """_last_files_scanned empty when paths.scanned missing."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/ws")
+        tool.forward("p/python")
+        assert tool._last_files_scanned == []
+
+    def test_validation_error_leaves_cmd_empty(self):
+        """On validation error, _last_cmd stays empty."""
+        tool = SemgrepTool(workspace_path="/ws")
+        tool.forward("/etc/passwd")
+        assert tool._last_cmd == []
+
+    @patch("src.tools.subprocess.run")
+    def test_cmd_with_multiple_rulesets(self, mock_run):
+        """_last_cmd shows all rulesets."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": [], "paths": {"scanned": []}}),
+            stderr="",
+            returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/ws")
+        tool.forward("p/python,p/owasp-top-ten")
+        assert tool._last_cmd == [
+            "semgrep", "--json", "--quiet",
+            "--config", "p/python",
+            "--config", "p/owasp-top-ten",
+            "/ws",
+        ]

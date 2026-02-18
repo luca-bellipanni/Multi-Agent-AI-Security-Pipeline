@@ -498,3 +498,11 @@ class TestAnalyzerAgentObservability:
         create_analyzer_agent("key", "model-id")
         call_kwargs = mock_model.call_args.kwargs
         assert call_kwargs["timeout"] == 120
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_llm_num_retries_set(self, mock_agent, mock_model):
+        """LiteLLMModel created with num_retries=1 to limit 429 backoff."""
+        create_analyzer_agent("key", "model-id")
+        call_kwargs = mock_model.call_args.kwargs
+        assert call_kwargs["num_retries"] == 1
