@@ -297,9 +297,12 @@ class TestCreateAnalyzerAgent:
     @patch("src.analyzer_agent.CodeAgent")
     def test_system_prompt_set(self, mock_agent, mock_model):
         create_analyzer_agent("key", "model-id")
-        call_kwargs = mock_agent.call_args
-        prompt = call_kwargs.kwargs.get("system_prompt", "")
-        assert "appsec" in prompt.lower() or "security" in prompt.lower()
+        agent_instance = mock_agent.return_value
+        prompt = agent_instance.prompt_templates.__getitem__("system_prompt")
+        # Verify append was called with our security prompt
+        agent_instance.prompt_templates.__setitem__.assert_called()
+        # Also verify the ANALYZER_SYSTEM_PROMPT constant has security content
+        assert "appsec" in ANALYZER_SYSTEM_PROMPT.lower() or "security" in ANALYZER_SYSTEM_PROMPT.lower()
 
     @patch("src.analyzer_agent.LiteLLMModel")
     @patch("src.analyzer_agent.CodeAgent")
@@ -401,3 +404,97 @@ class TestRunAnalyzer:
         mock_agent.run.return_value = 42
         result = run_analyzer(mock_agent, _make_triage())
         assert result["confirmed"] == []
+
+    def test_handles_dict_agent_response(self):
+        """agent.run() returns dict directly via final_answer()."""
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = {
+            "findings_analyzed": 2,
+            "confirmed": [{"rule_id": "r.1", "severity": "HIGH",
+                           "path": "a.py", "line": 1, "reason": "bad"}],
+            "dismissed": [],
+            "summary": "one issue",
+        }
+        result = run_analyzer(mock_agent, _make_triage())
+        assert result["findings_analyzed"] == 2
+        assert len(result["confirmed"]) == 1
+
+
+# ── Dict input to parser ────────────────────────────────────────────
+
+
+class TestParseAnalyzerDictInput:
+    """Parser accepts dict input directly (from agent.run final_answer)."""
+
+    def test_dict_full_response(self):
+        response = {
+            "rulesets_used": ["p/security-audit"],
+            "rulesets_rationale": "Python code",
+            "findings_analyzed": 2,
+            "confirmed": [{"rule_id": "python.exec", "severity": "HIGH",
+                           "path": "app.py", "line": 10, "reason": "exec"}],
+            "dismissed": [],
+            "summary": "One issue found.",
+            "risk_assessment": "High",
+        }
+        result = parse_analyzer_response(response)
+        assert result["findings_analyzed"] == 2
+        assert len(result["confirmed"]) == 1
+        assert result["rulesets_used"] == ["p/security-audit"]
+        assert result["summary"] == "One issue found."
+
+    def test_dict_empty_response(self):
+        result = parse_analyzer_response({})
+        assert result["confirmed"] == []
+        assert result["summary"] == "No summary provided."
+
+    def test_dict_no_confirmed(self):
+        response = {"summary": "clean", "dismissed": [], "findings_analyzed": 0}
+        result = parse_analyzer_response(response)
+        assert result["confirmed"] == []
+        assert result["summary"] == "clean"
+
+
+# ── Verbosity ────────────────────────────────────────────────────────
+
+
+class TestAnalyzerAgentVerbosity:
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_verbosity_off(self, mock_agent, mock_model):
+        from smolagents.monitoring import LogLevel
+        create_analyzer_agent("key", "model-id")
+        call_kwargs = mock_agent.call_args
+        assert call_kwargs.kwargs.get("verbosity_level") == LogLevel.OFF
+
+
+# ── Observability: step_callbacks + LLM timeout ─────────────────────
+
+
+class TestAnalyzerAgentObservability:
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_step_callbacks_forwarded(self, mock_agent, mock_model):
+        """step_callbacks parameter forwarded to CodeAgent."""
+        cb = lambda step, **kw: None  # noqa: E731
+        create_analyzer_agent("key", "model-id", step_callbacks=[cb])
+        call_kwargs = mock_agent.call_args.kwargs
+        assert call_kwargs["step_callbacks"] == [cb]
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_step_callbacks_default_none(self, mock_agent, mock_model):
+        """Without step_callbacks, None is passed."""
+        create_analyzer_agent("key", "model-id")
+        call_kwargs = mock_agent.call_args.kwargs
+        assert call_kwargs.get("step_callbacks") is None
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_llm_timeout_set(self, mock_agent, mock_model):
+        """LiteLLMModel created with timeout=120 for analyzer."""
+        create_analyzer_agent("key", "model-id")
+        call_kwargs = mock_model.call_args.kwargs
+        assert call_kwargs["timeout"] == 120

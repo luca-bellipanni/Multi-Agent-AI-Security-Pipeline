@@ -33,6 +33,7 @@ Security (llm-security/output-handling — LLM05):
 import json
 
 from smolagents import CodeAgent, LiteLLMModel
+from smolagents.monitoring import LogLevel
 
 
 ANALYZER_SYSTEM_PROMPT = """\
@@ -103,7 +104,7 @@ FALSE POSITIVE CRITERIA (use ONLY these):
 - Rule is informational (INFO severity) and pattern is common/expected
 Do NOT dismiss findings for any other reason.
 
-Respond with ONLY a JSON object, no other text:
+When your analysis is complete, call final_answer() with a dict containing these keys:
 {
   "rulesets_used": ["p/security-audit", "p/python"],
   "rulesets_rationale": "Python source code with auth changes",
@@ -127,19 +128,24 @@ def create_analyzer_agent(
     api_key: str,
     model_id: str,
     tools: list | None = None,
+    step_callbacks: list | None = None,
 ) -> CodeAgent:
     """Create an AppSec Agent with security tools."""
     model = LiteLLMModel(
         model_id=model_id,
         api_key=api_key,
         temperature=0.1,
+        timeout=120,
     )
-    return CodeAgent(
+    agent = CodeAgent(
         tools=tools or [],
         model=model,
-        system_prompt=ANALYZER_SYSTEM_PROMPT,
         max_steps=10,
+        verbosity_level=LogLevel.OFF,
+        step_callbacks=step_callbacks,
     )
+    agent.prompt_templates["system_prompt"] += "\n\n" + ANALYZER_SYSTEM_PROMPT
+    return agent
 
 
 def build_analyzer_task(triage_result: dict) -> str:
@@ -187,8 +193,8 @@ def build_analyzer_task(triage_result: dict) -> str:
     return "\n".join(parts)
 
 
-def parse_analyzer_response(response: str) -> dict:
-    """Parse the AppSec Agent's JSON response.
+def parse_analyzer_response(response) -> dict:
+    """Parse the AppSec Agent's response (dict or JSON string).
 
     Returns a dict with 'confirmed', 'dismissed', 'summary',
     'findings_analyzed', 'rulesets_used', 'rulesets_rationale',
@@ -212,19 +218,20 @@ def parse_analyzer_response(response: str) -> dict:
         "risk_assessment": "",
     }
 
-    if not response or not isinstance(response, str):
-        return default
-
-    text = response.strip()
-
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start == -1 or end == 0:
-        return default
-
-    try:
-        data = json.loads(text[start:end])
-    except json.JSONDecodeError:
+    # agent.run() returns a dict directly via final_answer()
+    if isinstance(response, dict):
+        data = response
+    elif isinstance(response, str) and response.strip():
+        text = response.strip()
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start == -1 or end == 0:
+            return default
+        try:
+            data = json.loads(text[start:end])
+        except json.JSONDecodeError:
+            return default
+    else:
         return default
 
     result = {
@@ -293,4 +300,4 @@ def run_analyzer(agent: CodeAgent, triage_result: dict) -> dict:
     """Run the AppSec Agent and return parsed results."""
     task = build_analyzer_task(triage_result)
     response = agent.run(task)
-    return parse_analyzer_response(str(response))
+    return parse_analyzer_response(response)

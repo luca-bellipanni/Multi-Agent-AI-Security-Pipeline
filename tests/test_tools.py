@@ -1078,3 +1078,248 @@ class TestToolCallCount:
         tool = SemgrepTool(workspace_path="/tmp")
         tool.forward("/etc/passwd")  # invalid ruleset
         assert tool._call_count == 1
+
+
+# --- A1: Return code check in _execute() ---
+
+class TestSemgrepReturnCode:
+
+    @patch("src.tools.subprocess.run")
+    def test_exit_0_success(self, mock_run):
+        """Exit 0 (no findings) returns stdout normally."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("p/python")
+        assert "No findings" in result
+
+    @patch("src.tools.subprocess.run")
+    def test_exit_1_findings(self, mock_run):
+        """Exit 1 (findings found) returns stdout normally."""
+        mock_run.return_value = MagicMock(
+            stdout=_make_semgrep_json([{"rule_id": "test.xss", "severity": "WARNING"}]),
+            stderr="", returncode=1,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("p/python")
+        assert "1 finding(s)" in result
+
+    @patch("src.tools.subprocess.run")
+    def test_exit_2_with_stdout_returns_partial(self, mock_run):
+        """Exit 2+ with stdout returns stdout (partial results)."""
+        partial = json.dumps({"results": [
+            {"check_id": "r1", "path": "a.py",
+             "start": {"line": 1, "col": 1, "offset": 0},
+             "end": {"line": 1, "col": 10, "offset": 10},
+             "extra": {"severity": "ERROR", "message": "Bad", "metadata": {}}}
+        ], "errors": [{"message": "download failed"}]})
+        mock_run.return_value = MagicMock(
+            stdout=partial, stderr="something", returncode=2,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("p/python")
+        # Should still get findings from partial output
+        assert "1 finding(s)" in result
+
+    @patch("src.tools.subprocess.run")
+    def test_exit_2_no_stdout_returns_error(self, mock_run):
+        """Exit 2+ with no stdout returns error message."""
+        mock_run.return_value = MagicMock(
+            stdout="", stderr="fatal: no rules loaded", returncode=2,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("p/python")
+        assert "Error: Semgrep failed (exit 2)" in result
+        assert "fatal: no rules loaded" in result
+
+    @patch("src.tools.subprocess.run")
+    def test_exit_3_stderr_preview_truncated(self, mock_run):
+        """Exit 3+ stderr is truncated to 2000 chars."""
+        long_stderr = "x" * 5000
+        mock_run.return_value = MagicMock(
+            stdout="", stderr=long_stderr, returncode=3,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("p/python")
+        assert "Error: Semgrep failed (exit 3)" in result
+        # stderr preview should be at most 2000 chars
+        assert "x" * 2000 in result
+        assert "x" * 2001 not in result
+
+    @patch("src.tools.subprocess.run")
+    def test_exit_2_empty_stderr(self, mock_run):
+        """Exit 2 with no stderr shows 'no output'."""
+        mock_run.return_value = MagicMock(
+            stdout="", stderr="", returncode=2,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        result = tool.forward("p/python")
+        assert "no output" in result
+
+
+# --- A2: Error details in _format_semgrep_findings() ---
+
+class TestSemgrepErrorDetails:
+
+    def test_no_errors_no_section(self):
+        raw = json.dumps({"results": [], "errors": []})
+        result = _format_semgrep_findings(raw)
+        assert "error" not in result.lower()
+
+    def test_errors_shown_with_messages(self):
+        raw = json.dumps({"results": [], "errors": [
+            {"message": "Failed to download p/python"},
+            {"message": "Failed to download p/owasp-top-ten"},
+        ]})
+        result = _format_semgrep_findings(raw)
+        assert "2 scan error(s):" in result
+        assert "Failed to download p/python" in result
+        assert "Failed to download p/owasp-top-ten" in result
+
+    def test_errors_capped_at_5(self):
+        errors = [{"message": f"error {i}"} for i in range(10)]
+        raw = json.dumps({"results": [], "errors": errors})
+        result = _format_semgrep_findings(raw)
+        assert "10 scan error(s):" in result
+        # Only first 5 detailed
+        assert "error 4" in result
+        assert "error 5" not in result
+
+    def test_error_message_truncated_at_200(self):
+        long_msg = "A" * 300
+        raw = json.dumps({"results": [], "errors": [{"message": long_msg}]})
+        result = _format_semgrep_findings(raw)
+        assert "A" * 200 in result
+        assert "A" * 201 not in result
+
+    def test_non_dict_error_uses_str(self):
+        raw = json.dumps({"results": [], "errors": ["simple string error"]})
+        result = _format_semgrep_findings(raw)
+        assert "simple string error" in result
+
+    def test_errors_with_findings(self):
+        raw = json.dumps({"results": [
+            {"check_id": "r1", "path": "a.py",
+             "start": {"line": 1, "col": 1, "offset": 0},
+             "end": {"line": 1, "col": 10, "offset": 10},
+             "extra": {"severity": "WARNING", "message": "msg", "metadata": {}}}
+        ], "errors": [{"message": "partial failure"}]})
+        result = _format_semgrep_findings(raw)
+        assert "1 finding(s)" in result
+        assert "1 scan error(s):" in result
+        assert "partial failure" in result
+
+
+# --- Scanned file count ---
+
+class TestSemgrepScannedFileCount:
+
+    def test_no_findings_shows_scanned_count(self):
+        """When 0 findings, show how many files were scanned."""
+        raw = json.dumps({
+            "results": [], "errors": [],
+            "paths": {"scanned": ["a.py", "b.py", "c.py"]},
+        })
+        result = _format_semgrep_findings(raw)
+        assert "No findings (3 file(s) scanned)" in result
+
+    def test_no_findings_zero_scanned(self):
+        """When 0 findings and 0 scanned files, shows 0."""
+        raw = json.dumps({"results": [], "errors": [], "paths": {"scanned": []}})
+        result = _format_semgrep_findings(raw)
+        assert "No findings (0 file(s) scanned)" in result
+
+    def test_no_paths_key_defaults_zero(self):
+        """When paths key missing, defaults to 0 scanned."""
+        raw = json.dumps({"results": [], "errors": []})
+        result = _format_semgrep_findings(raw)
+        assert "0 file(s) scanned" in result
+
+    def test_findings_with_scanned_count(self):
+        """When findings present, scanned count in header."""
+        raw = json.dumps({
+            "results": [
+                {"check_id": "r1", "path": "a.py",
+                 "start": {"line": 1, "col": 1, "offset": 0},
+                 "end": {"line": 1, "col": 10, "offset": 10},
+                 "extra": {"severity": "WARNING", "message": "msg", "metadata": {}}}
+            ],
+            "errors": [],
+            "paths": {"scanned": ["a.py", "b.py"]},
+        })
+        result = _format_semgrep_findings(raw)
+        assert "1 finding(s) (2 file(s) scanned)" in result
+
+
+# --- A3: Error side channel ---
+
+class TestSemgrepErrorSideChannel:
+
+    def test_initial_empty(self):
+        tool = SemgrepTool(workspace_path="/tmp")
+        assert tool._last_scan_errors == []
+        assert tool._all_scan_errors == []
+
+    @patch("src.tools.subprocess.run")
+    def test_errors_captured_in_side_channel(self, mock_run):
+        errors = [{"message": "download failed"}, {"message": "parse error"}]
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": errors}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("p/python")
+        assert len(tool._last_scan_errors) == 2
+        assert tool._last_scan_errors[0]["message"] == "download failed"
+        assert len(tool._all_scan_errors) == 2
+
+    @patch("src.tools.subprocess.run")
+    def test_cumulative_across_calls(self, mock_run):
+        errors1 = [{"message": "err1"}]
+        errors2 = [{"message": "err2"}, {"message": "err3"}]
+        mock_run.side_effect = [
+            MagicMock(
+                stdout=json.dumps({"results": [], "errors": errors1}),
+                stderr="", returncode=0,
+            ),
+            MagicMock(
+                stdout=json.dumps({"results": [], "errors": errors2}),
+                stderr="", returncode=0,
+            ),
+        ]
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("p/python")
+        assert len(tool._last_scan_errors) == 1
+        assert len(tool._all_scan_errors) == 1
+        tool.forward("p/java")
+        assert len(tool._last_scan_errors) == 2
+        assert len(tool._all_scan_errors) == 3
+
+    @patch("src.tools.subprocess.run")
+    def test_last_reset_each_call(self, mock_run):
+        errors = [{"message": "err1"}]
+        mock_run.side_effect = [
+            MagicMock(
+                stdout=json.dumps({"results": [], "errors": errors}),
+                stderr="", returncode=0,
+            ),
+            MagicMock(
+                stdout=json.dumps({"results": [], "errors": []}),
+                stderr="", returncode=0,
+            ),
+        ]
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("p/python")
+        assert len(tool._last_scan_errors) == 1
+        tool.forward("p/java")
+        assert len(tool._last_scan_errors) == 0
+        # Cumulative still has the first one
+        assert len(tool._all_scan_errors) == 1
+
+    def test_validation_error_no_scan_errors(self):
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("/etc/passwd")
+        assert tool._last_scan_errors == []
+        assert tool._all_scan_errors == []

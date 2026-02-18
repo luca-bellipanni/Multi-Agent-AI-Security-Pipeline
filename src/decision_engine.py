@@ -26,6 +26,14 @@ from src.models import (
 from src.github_context import GitHubContext
 from src.memory import MemoryStore
 
+# Suppress LiteLLM "Give Feedback" / "_turn_on_debug()" console spam.
+# Only cosmetic — LLM errors still propagate as exceptions.
+try:
+    import litellm
+    litellm.suppress_debug_info = True
+except ImportError:
+    pass
+
 
 _EMPTY_ANALYSIS = {
     "confirmed": [],
@@ -154,6 +162,7 @@ class DecisionEngine:
         try:
             from src.agent import create_triage_agent, run_triage
             from src.tools import FetchPRFilesTool
+            from src.observability import make_step_logger, run_with_timeout
 
             print(f"Running AI triage (model: {model_id})...")
 
@@ -166,9 +175,23 @@ class DecisionEngine:
                 )
                 tools.append(fetch_tool)
 
-            agent = create_triage_agent(api_key, model_id, tools=tools)
-            result = run_triage(agent, ctx)
+            callback = make_step_logger("Triage", max_seconds=120)
+            agent = create_triage_agent(
+                api_key, model_id, tools=tools,
+                step_callbacks=[callback],
+            )
+            result = run_with_timeout(
+                run_triage, (agent, ctx),
+                max_seconds=120, agent_name="Triage", agent=agent,
+            )
             print(f"AI triage complete: {result['reason']}")
+
+            # Context summary for CI readability
+            triage_ctx = result.get("context", {})
+            files = triage_ctx.get("files_changed", 0)
+            langs = ", ".join(triage_ctx.get("languages", [])) or "unknown"
+            risks = ", ".join(triage_ctx.get("risk_areas", [])) or "none detected"
+            print(f"  {files} file(s) | {langs} | risk: {risks}")
 
             tools_used: dict[str, int] = {}
             if fetch_tool is not None and fetch_tool._call_count > 0:
@@ -222,6 +245,7 @@ class DecisionEngine:
         try:
             from src.analyzer_agent import create_analyzer_agent, run_analyzer
             from src.tools import FetchPRDiffTool, SemgrepTool
+            from src.observability import make_step_logger, run_with_timeout
 
             print("Running AppSec Agent (OODA loop)...")
 
@@ -239,11 +263,48 @@ class DecisionEngine:
                 )
                 tools.append(diff_tool)
 
+            callback = make_step_logger("AppSec", max_seconds=600)
             agent = create_analyzer_agent(
                 api_key, model_id, tools=tools,
+                step_callbacks=[callback],
             )
-            analysis = run_analyzer(agent, triage)
+            analysis = run_with_timeout(
+                run_analyzer, (agent, triage),
+                max_seconds=600, agent_name="AppSec", agent=agent,
+            )
             print(f"AppSec Agent complete: {analysis.get('summary', 'N/A')}")
+
+            # Semgrep diagnostics
+            print(f"  Semgrep: {semgrep_tool._call_count} scan(s), "
+                  f"{len(semgrep_tool._all_raw_findings)} finding(s)")
+            if semgrep_tool._all_scan_errors:
+                print(f"  Semgrep errors "
+                      f"({len(semgrep_tool._all_scan_errors)}):")
+                for e in semgrep_tool._all_scan_errors[:3]:
+                    msg = (e.get("message", str(e))
+                           if isinstance(e, dict) else str(e))
+                    print(f"    - {msg[:200]}")
+            if diff_tool is not None and diff_tool._call_count > 0:
+                print(f"  Diff: {diff_tool._call_count} call(s)")
+            print(f"  Workspace: {semgrep_tool.workspace_path}")
+            if semgrep_tool._all_configs_used:
+                configs = ", ".join(semgrep_tool._all_configs_used)
+                print(f"  Configs: {configs}")
+            else:
+                print("  Configs: (none — agent never called run_semgrep?)")
+
+            # Agent findings table
+            confirmed = analysis.get("confirmed", [])
+            dismissed = analysis.get("dismissed", [])
+            if confirmed or dismissed:
+                print(f"\n  Agent findings ({len(confirmed)} confirmed, "
+                      f"{len(dismissed)} dismissed):")
+                for c in confirmed:
+                    sev = c.get("severity", "?").upper()
+                    rule = c.get("rule_id", "?")
+                    path = c.get("path", "?")
+                    line = c.get("line", "?")
+                    print(f"    [{sev:<8s}] {rule} — {path}:{line}")
 
             # CUMULATIVE SIDE CHANNEL: read ALL findings from ALL tool calls
             raw_findings = semgrep_tool._all_raw_findings
@@ -677,6 +738,18 @@ class DecisionEngine:
 
         findings_count = len(effective_findings)
 
+        # Smart Gate summary (always visible in CI logs)
+        raw_count = len(raw_findings)
+        agent_confirmed_count = len(agent_analysis.get("confirmed", []))
+        print(f"  Scanner: {raw_count} raw finding(s)")
+        if agent_confirmed_count:
+            print(f"  Agent: {agent_confirmed_count} confirmed "
+                  f"-> {findings_count} validated")
+        if agent_confirmed_count > 0 and findings_count == 0:
+            print(f"  Warning: {agent_confirmed_count} agent finding(s) "
+                  f"not confirmed by scanner")
+        print(f"  Mode: {ctx.mode}")
+
         excepted_count = len(excepted_info)
 
         # Build structured findings lists for PR reporting
@@ -689,11 +762,6 @@ class DecisionEngine:
         # Shadow mode: always allow, but report everything
         if ctx.mode == "shadow":
             raw_count = len(raw_findings)
-            if raw_count > 0:
-                print(
-                    f"[Shadow] {raw_count} raw finding(s), "
-                    f"max severity: {max_raw_severity.value}"
-                )
             return Decision(
                 verdict=Verdict.ALLOWED,
                 continue_pipeline=True,

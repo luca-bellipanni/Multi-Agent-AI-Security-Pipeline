@@ -10,6 +10,7 @@ Security (LLM06): tools have workspace injection and scope lock.
 """
 
 from smolagents import CodeAgent, LiteLLMModel
+from smolagents.monitoring import LogLevel
 
 
 REMEDIATION_SYSTEM_PROMPT = """\
@@ -62,6 +63,7 @@ def create_remediation_agent(
     api_key: str,
     model_id: str,
     tools: list,
+    step_callbacks: list | None = None,
 ) -> CodeAgent:
     """Create a Remediation Agent instance.
 
@@ -69,6 +71,7 @@ def create_remediation_agent(
         api_key: AI provider API key.
         model_id: LiteLLM model ID.
         tools: List of Tool instances (ReadCodeTool, ApplyFixTool).
+        step_callbacks: Optional smolagents step callbacks for observability.
 
     Returns:
         Configured CodeAgent for remediation.
@@ -77,13 +80,17 @@ def create_remediation_agent(
         model_id=model_id,
         api_key=api_key,
         temperature=0.1,
+        timeout=120,
     )
-    return CodeAgent(
+    agent = CodeAgent(
         tools=tools,
         model=model,
-        system_prompt=REMEDIATION_SYSTEM_PROMPT,
         max_steps=15,
+        verbosity_level=LogLevel.OFF,
+        step_callbacks=step_callbacks,
     )
+    agent.prompt_templates["system_prompt"] += "\n\n" + REMEDIATION_SYSTEM_PROMPT
+    return agent
 
 
 def build_remediation_task(file_path: str, findings: list[dict]) -> str:
