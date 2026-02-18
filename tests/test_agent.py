@@ -437,3 +437,11 @@ class TestTriageAgentObservability:
         create_triage_agent("key", "model")
         call_kwargs = mock_model.call_args.kwargs
         assert call_kwargs["timeout"] == 30
+
+    @patch("src.agent.LiteLLMModel")
+    @patch("src.agent.CodeAgent")
+    def test_llm_num_retries_set(self, mock_code_agent, mock_model):
+        """LiteLLMModel created with num_retries=1 to limit 429 backoff."""
+        create_triage_agent("key", "model")
+        call_kwargs = mock_model.call_args.kwargs
+        assert call_kwargs["num_retries"] == 1

@@ -293,6 +293,31 @@ class DecisionEngine:
             else:
                 print("  Configs: (none — agent never called run_semgrep?)")
 
+            # Extended diagnostics: command, files scanned, workspace listing
+            if semgrep_tool._last_cmd:
+                print(f"  Command: {' '.join(semgrep_tool._last_cmd)}")
+            if semgrep_tool._last_files_scanned:
+                print(f"  Files scanned ({len(semgrep_tool._last_files_scanned)}):")
+                for fp in semgrep_tool._last_files_scanned[:20]:
+                    print(f"    - {fp}")
+            elif semgrep_tool._call_count > 0:
+                print("  Files scanned: 0 (Semgrep scanned no files!)")
+            if semgrep_tool._last_stderr:
+                stderr_preview = semgrep_tool._last_stderr.strip()[:500]
+                print(f"  Stderr: {stderr_preview}")
+            # Workspace listing: show what's actually on disk
+            ws = semgrep_tool.workspace_path
+            ws_exists = os.path.isdir(ws)
+            print(f"  Workspace exists: {ws_exists}")
+            if ws_exists:
+                try:
+                    entries = sorted(os.listdir(ws))[:30]
+                    print(f"  Workspace files ({len(entries)}):")
+                    for entry in entries:
+                        print(f"    - {entry}")
+                except OSError as e:
+                    print(f"  Workspace listing error: {e}")
+
             # Agent findings table
             confirmed = analysis.get("confirmed", [])
             dismissed = analysis.get("dismissed", [])

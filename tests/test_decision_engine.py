@@ -1531,6 +1531,10 @@ class TestAnalyzerDiagnosticsPrint:
             mock_st._all_raw_findings = []
             mock_st._all_scan_errors = []
             mock_st._all_configs_used = ["p/python"]
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/test/workspace"
             MockSemgrep.return_value = mock_st
 
             mock_dt = MagicMock()
@@ -1570,6 +1574,10 @@ class TestAnalyzerDiagnosticsPrint:
                 {"message": "Network timeout"},
             ]
             mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/test/workspace"
             MockSemgrep.return_value = mock_st
 
             mock_dt = MagicMock()
@@ -1612,6 +1620,10 @@ class TestAnalyzerDiagnosticsPrint:
             mock_st._all_raw_findings = []
             mock_st._all_scan_errors = []
             mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/test/workspace"
             MockSemgrep.return_value = mock_st
 
             mock_dt = MagicMock()
@@ -1652,6 +1664,10 @@ class TestAnalyzerDiagnosticsPrint:
             mock_st._all_raw_findings = []
             mock_st._all_scan_errors = []
             mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/test/workspace"
             MockSemgrep.return_value = mock_st
 
             mock_dt = MagicMock()
@@ -1680,6 +1696,9 @@ class TestAnalyzerDiagnosticsPrint:
             mock_st._all_raw_findings = []
             mock_st._all_scan_errors = []
             mock_st._all_configs_used = ["p/security-audit", "p/python"]
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
             mock_st.workspace_path = "/github/workspace"
             MockSemgrep.return_value = mock_st
             mock_dt = MagicMock()
@@ -1708,6 +1727,9 @@ class TestAnalyzerDiagnosticsPrint:
             mock_st._all_raw_findings = []
             mock_st._all_scan_errors = []
             mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
             mock_st.workspace_path = "/test/workspace"
             MockSemgrep.return_value = mock_st
             mock_dt = MagicMock()
@@ -1736,6 +1758,9 @@ class TestAnalyzerDiagnosticsPrint:
             mock_st._all_raw_findings = []
             mock_st._all_scan_errors = []
             mock_st._all_configs_used = ["p/python"]
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
             mock_st.workspace_path = "/github/workspace"
             MockSemgrep.return_value = mock_st
             mock_dt = MagicMock()
@@ -1745,6 +1770,200 @@ class TestAnalyzerDiagnosticsPrint:
             engine._run_analyzer(_make_context(), _make_triage())
             out = capsys.readouterr().out
             assert "Workspace: /github/workspace" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_command_printed(self, mock_agent, mock_run, capsys):
+        """Semgrep command printed when _last_cmd is populated."""
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = ["p/python"]
+            mock_st._last_cmd = ["semgrep", "--json", "--quiet", "--config", "p/python", "/ws"]
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/ws"
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "Command: semgrep --json --quiet --config p/python /ws" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_files_scanned_printed(self, mock_agent, mock_run, capsys):
+        """Files scanned list printed when available."""
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = ["p/python"]
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = ["app.py", "utils.py"]
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/ws"
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "Files scanned (2):" in out
+            assert "- app.py" in out
+            assert "- utils.py" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_zero_files_scanned_warning(self, mock_agent, mock_run, capsys):
+        """Warning printed when Semgrep ran but scanned 0 files."""
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = ["p/python"]
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/ws"
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "Files scanned: 0" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_stderr_printed(self, mock_agent, mock_run, capsys):
+        """Stderr printed when present."""
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = ["p/python"]
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = "Downloading config..."
+            mock_st.workspace_path = "/ws"
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "Stderr: Downloading config..." in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_workspace_exists_printed(self, mock_agent, mock_run, capsys):
+        """Workspace exists check always printed."""
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = ["p/python"]
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/nonexistent/path"
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "Workspace exists: False" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_workspace_listing_when_exists(self, mock_agent, mock_run, capsys, tmp_path):
+        """Workspace file listing printed when directory exists."""
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+        # Create real temp files to list
+        (tmp_path / "app.py").write_text("x")
+        (tmp_path / "readme.md").write_text("y")
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = ["p/python"]
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = str(tmp_path)
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "Workspace exists: True" in out
+            assert "Workspace files (2):" in out
+            assert "- app.py" in out
+            assert "- readme.md" in out
 
 
 # --- B3b: Observability — step callbacks wired ---
@@ -1801,6 +2020,9 @@ class TestObservabilityWiring:
             mock_st._all_raw_findings = []
             mock_st._all_scan_errors = []
             mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
             mock_st.workspace_path = "/test"
             MockSemgrep.return_value = mock_st
             mock_dt = MagicMock()

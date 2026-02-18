@@ -527,6 +527,10 @@ class SemgrepTool(Tool):
         self._last_config_used: list[str] = []
         self._last_error: str = ""
         self._last_scan_errors: list = []
+        # Diagnostic side channels (for CI debugging):
+        self._last_cmd: list[str] = []
+        self._last_stderr: str = ""
+        self._last_files_scanned: list[str] = []
         # Cumulative across all calls (OODA: agent may call multiple times):
         self._all_raw_findings: list[Finding] = []
         self._all_configs_used: list[str] = []
@@ -564,11 +568,12 @@ class SemgrepTool(Tool):
         self._last_raw_findings = parse_semgrep_findings(raw_json)
         self._all_raw_findings.extend(self._last_raw_findings)
 
-        # Capture scan errors from Semgrep JSON for diagnostics
+        # Capture scan errors and scanned paths from Semgrep JSON for diagnostics
         try:
             scan_data = json_module.loads(raw_json)
             self._last_scan_errors = scan_data.get("errors", [])
             self._all_scan_errors.extend(self._last_scan_errors)
+            self._last_files_scanned = scan_data.get("paths", {}).get("scanned", [])
         except (json_module.JSONDecodeError, TypeError):
             pass
 
@@ -602,6 +607,7 @@ class SemgrepTool(Tool):
         for rs in rulesets:
             cmd.extend(["--config", rs])
         cmd.append(self.workspace_path)
+        self._last_cmd = list(cmd)
 
         try:
             result = subprocess.run(
@@ -614,6 +620,9 @@ class SemgrepTool(Tool):
             return "", "Error: Semgrep is not installed or not accessible."
         except subprocess.TimeoutExpired:
             return "", f"Error: Semgrep timed out after {self.timeout} seconds."
+
+        # Always capture stderr for diagnostics
+        self._last_stderr = result.stderr or ""
 
         # Semgrep exit code: 0=no findings, 1=findings found, 2+=errors
         if result.returncode > 1:

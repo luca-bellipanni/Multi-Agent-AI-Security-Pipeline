@@ -1323,3 +1323,105 @@ class TestSemgrepErrorSideChannel:
         tool.forward("/etc/passwd")
         assert tool._last_scan_errors == []
         assert tool._all_scan_errors == []
+
+
+class TestSemgrepExecuteDiagnostics:
+    """Tests for Semgrep diagnostic side channels (_last_cmd, _last_stderr, _last_files_scanned)."""
+
+    def test_initial_diagnostic_attrs(self):
+        """New diagnostic attributes are empty on fresh tool."""
+        tool = SemgrepTool(workspace_path="/tmp")
+        assert tool._last_cmd == []
+        assert tool._last_stderr == ""
+        assert tool._last_files_scanned == []
+
+    @patch("src.tools.subprocess.run")
+    def test_last_cmd_populated(self, mock_run):
+        """_last_cmd captures the full command array."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/workspace")
+        tool.forward("p/python")
+        assert tool._last_cmd[0] == "semgrep"
+        assert "--config" in tool._last_cmd
+        assert "p/python" in tool._last_cmd
+        assert tool._last_cmd[-1] == "/workspace"
+
+    @patch("src.tools.subprocess.run")
+    def test_last_stderr_captured(self, mock_run):
+        """_last_stderr captures stderr even on success."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="Some warning output", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("p/python")
+        assert tool._last_stderr == "Some warning output"
+
+    @patch("src.tools.subprocess.run")
+    def test_last_stderr_empty_on_clean_run(self, mock_run):
+        """_last_stderr is empty when no stderr."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("p/python")
+        assert tool._last_stderr == ""
+
+    @patch("src.tools.subprocess.run")
+    def test_files_scanned_captured(self, mock_run):
+        """_last_files_scanned extracted from Semgrep JSON paths.scanned."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({
+                "results": [], "errors": [],
+                "paths": {"scanned": ["app.py", "utils.py"]},
+            }),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("p/python")
+        assert tool._last_files_scanned == ["app.py", "utils.py"]
+
+    @patch("src.tools.subprocess.run")
+    def test_files_scanned_empty_when_no_paths(self, mock_run):
+        """_last_files_scanned stays empty when JSON has no paths key."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("p/python")
+        assert tool._last_files_scanned == []
+
+    def test_validation_error_leaves_cmd_empty(self):
+        """On validation error, _last_cmd stays empty (no subprocess ran)."""
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("/etc/passwd")
+        assert tool._last_cmd == []
+
+    @patch("src.tools.subprocess.run")
+    def test_cmd_with_multiple_rulesets(self, mock_run):
+        """_last_cmd includes all rulesets from comma-separated config."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/ws")
+        tool.forward("p/python,p/security-audit")
+        assert tool._last_cmd.count("--config") == 2
+        assert "p/python" in tool._last_cmd
+        assert "p/security-audit" in tool._last_cmd
+
+    @patch("src.tools.subprocess.run")
+    def test_stderr_captured_on_error_exit(self, mock_run):
+        """_last_stderr captured even when Semgrep fails (exit > 1)."""
+        mock_run.return_value = MagicMock(
+            stdout="", stderr="Fatal error occurred",
+            returncode=2,
+        )
+        tool = SemgrepTool(workspace_path="/tmp")
+        tool.forward("p/python")
+        assert tool._last_stderr == "Fatal error occurred"
