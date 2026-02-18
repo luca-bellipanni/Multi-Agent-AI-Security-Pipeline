@@ -13,6 +13,7 @@ specific tool rulesets — that is the specialist's job.
 import json
 
 from smolagents import CodeAgent, LiteLLMModel
+from smolagents.agents import EMPTY_PROMPT_TEMPLATES
 
 from src.github_context import GitHubContext
 
@@ -93,7 +94,7 @@ def create_triage_agent(
     return CodeAgent(
         tools=tools or [],
         model=model,
-        prompt_templates={"system_prompt": TRIAGE_SYSTEM_PROMPT},
+        prompt_templates={**EMPTY_PROMPT_TEMPLATES, "system_prompt": TRIAGE_SYSTEM_PROMPT},
         max_steps=3,
     )
 

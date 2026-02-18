@@ -33,6 +33,7 @@ Security (llm-security/output-handling — LLM05):
 import json
 
 from smolagents import CodeAgent, LiteLLMModel
+from smolagents.agents import EMPTY_PROMPT_TEMPLATES
 
 
 ANALYZER_SYSTEM_PROMPT = """\
@@ -137,7 +138,7 @@ def create_analyzer_agent(
     return CodeAgent(
         tools=tools or [],
         model=model,
-        prompt_templates={"system_prompt": ANALYZER_SYSTEM_PROMPT},
+        prompt_templates={**EMPTY_PROMPT_TEMPLATES, "system_prompt": ANALYZER_SYSTEM_PROMPT},
         max_steps=10,
     )
 
