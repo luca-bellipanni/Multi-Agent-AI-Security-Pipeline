@@ -1212,6 +1212,47 @@ class TestSemgrepErrorDetails:
         assert "partial failure" in result
 
 
+# --- Scanned file count ---
+
+class TestSemgrepScannedFileCount:
+
+    def test_no_findings_shows_scanned_count(self):
+        """When 0 findings, show how many files were scanned."""
+        raw = json.dumps({
+            "results": [], "errors": [],
+            "paths": {"scanned": ["a.py", "b.py", "c.py"]},
+        })
+        result = _format_semgrep_findings(raw)
+        assert "No findings (3 file(s) scanned)" in result
+
+    def test_no_findings_zero_scanned(self):
+        """When 0 findings and 0 scanned files, shows 0."""
+        raw = json.dumps({"results": [], "errors": [], "paths": {"scanned": []}})
+        result = _format_semgrep_findings(raw)
+        assert "No findings (0 file(s) scanned)" in result
+
+    def test_no_paths_key_defaults_zero(self):
+        """When paths key missing, defaults to 0 scanned."""
+        raw = json.dumps({"results": [], "errors": []})
+        result = _format_semgrep_findings(raw)
+        assert "0 file(s) scanned" in result
+
+    def test_findings_with_scanned_count(self):
+        """When findings present, scanned count in header."""
+        raw = json.dumps({
+            "results": [
+                {"check_id": "r1", "path": "a.py",
+                 "start": {"line": 1, "col": 1, "offset": 0},
+                 "end": {"line": 1, "col": 10, "offset": 10},
+                 "extra": {"severity": "WARNING", "message": "msg", "metadata": {}}}
+            ],
+            "errors": [],
+            "paths": {"scanned": ["a.py", "b.py"]},
+        })
+        result = _format_semgrep_findings(raw)
+        assert "1 finding(s) (2 file(s) scanned)" in result
+
+
 # --- A3: Error side channel ---
 
 class TestSemgrepErrorSideChannel:

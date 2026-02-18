@@ -449,11 +449,12 @@ def _format_semgrep_findings(raw_json: str) -> str:
 
     results = data.get("results", [])
     errors = data.get("errors", [])
+    scanned = data.get("paths", {}).get("scanned", [])
 
     if not results and not errors:
-        return "Semgrep scan complete. No findings."
+        return f"Semgrep scan complete. No findings ({len(scanned)} file(s) scanned)."
 
-    lines = [f"Semgrep scan complete. {len(results)} finding(s):"]
+    lines = [f"Semgrep scan complete. {len(results)} finding(s) ({len(scanned)} file(s) scanned):"]
     for r in results:
         check_id = r.get("check_id", "unknown")
         path = r.get("path", "unknown")

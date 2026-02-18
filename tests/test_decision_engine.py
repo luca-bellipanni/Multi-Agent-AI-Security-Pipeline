@@ -1662,6 +1662,90 @@ class TestAnalyzerDiagnosticsPrint:
             out = capsys.readouterr().out
             assert "Agent findings" not in out
 
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_configs_used_printed(self, mock_agent, mock_run, capsys):
+        """When agent used configs, they appear in diagnostics."""
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = ["p/security-audit", "p/python"]
+            mock_st.workspace_path = "/github/workspace"
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "Configs: p/security-audit, p/python" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_no_configs_shows_warning(self, mock_agent, mock_run, capsys):
+        """When _all_configs_used is empty, warning printed."""
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 0
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st.workspace_path = "/test/workspace"
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "Configs: (none" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_workspace_path_printed(self, mock_agent, mock_run, capsys):
+        """Workspace path always printed in diagnostics."""
+        mock_run.return_value = {
+            "confirmed": [], "dismissed": [], "summary": "OK",
+            "findings_analyzed": 0, "rulesets_used": [],
+            "rulesets_rationale": "", "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = ["p/python"]
+            mock_st.workspace_path = "/github/workspace"
+            MockSemgrep.return_value = mock_st
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "Workspace: /github/workspace" in out
+
 
 # --- B4: Smart Gate always-visible summary ---
 

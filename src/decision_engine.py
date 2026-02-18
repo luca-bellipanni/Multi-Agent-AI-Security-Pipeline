@@ -272,6 +272,12 @@ class DecisionEngine:
                     print(f"    - {msg[:200]}")
             if diff_tool is not None and diff_tool._call_count > 0:
                 print(f"  Diff: {diff_tool._call_count} call(s)")
+            print(f"  Workspace: {semgrep_tool.workspace_path}")
+            if semgrep_tool._all_configs_used:
+                configs = ", ".join(semgrep_tool._all_configs_used)
+                print(f"  Configs: {configs}")
+            else:
+                print("  Configs: (none — agent never called run_semgrep?)")
 
             # Agent findings table
             confirmed = analysis.get("confirmed", [])
