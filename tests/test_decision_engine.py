@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 from src.models import Verdict, Severity, Finding, StepTrace, ToolResult
 from src.github_context import GitHubContext
 from src.decision_engine import (
-    DecisionEngine, _normalize_severity, _resolve_dup_ids,
+    DecisionEngine, _EMPTY_ANALYSIS, _normalize_severity, _resolve_dup_ids,
     _shorten_rule_refs,
 )
 
@@ -2905,3 +2905,198 @@ class TestDismissedDedup:
         # short rule + line should be filtered out
         assert decision.findings_count == 1
         assert len(decision.dismissed_findings) == 0
+
+
+class TestPRScopedScan:
+    """Test that _run_analyzer fetches PR files and passes to SemgrepTool."""
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_pr_files_passed_to_semgrep_tool(
+        self, mock_agent, mock_run, capsys,
+    ):
+        """SemgrepTool created with target_files from PR file list."""
+        mock_run.return_value = dict(_EMPTY_ANALYSIS)
+        ctx = _make_context()
+
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff, \
+             patch("src.tools._fetch_pr_files_from_api") as mock_fetch:
+            # Mock PR file list
+            mock_fetch.return_value = (
+                [
+                    {"filename": "src/app.py", "status": "modified"},
+                    {"filename": "src/utils.py", "status": "added"},
+                    {"filename": "old_file.py", "status": "removed"},
+                ],
+                None,
+            )
+            mock_st = MagicMock()
+            mock_st._call_count = 0
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st._last_error = ""
+            mock_st.workspace_path = "/tmp/workspace"
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, _make_triage())
+
+            # SemgrepTool created with target_files (removed excluded)
+            call_kwargs = MockSemgrep.call_args[1]
+            assert "target_files" in call_kwargs
+            target = call_kwargs["target_files"]
+            assert "src/app.py" in target
+            assert "src/utils.py" in target
+            assert "old_file.py" not in target  # removed files excluded
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_pr_scope_printed(self, mock_agent, mock_run, capsys):
+        """CI output shows PR scope file count."""
+        mock_run.return_value = dict(_EMPTY_ANALYSIS)
+
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff, \
+             patch("src.tools._fetch_pr_files_from_api") as mock_fetch:
+            mock_fetch.return_value = (
+                [{"filename": "app.py", "status": "modified"}],
+                None,
+            )
+            mock_st = MagicMock()
+            mock_st._call_count = 0
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st._last_error = ""
+            mock_st.workspace_path = "/tmp/workspace"
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+            out = capsys.readouterr().out
+            assert "PR scope: 1 file(s)" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_api_error_falls_back_to_full_scan(
+        self, mock_agent, mock_run, capsys,
+    ):
+        """On API error, SemgrepTool gets target_files=None (full workspace)."""
+        mock_run.return_value = dict(_EMPTY_ANALYSIS)
+
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff, \
+             patch("src.tools._fetch_pr_files_from_api") as mock_fetch:
+            mock_fetch.return_value = ([], "Error: rate limit")
+            mock_st = MagicMock()
+            mock_st._call_count = 0
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st._last_error = ""
+            mock_st.workspace_path = "/tmp/workspace"
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+
+            call_kwargs = MockSemgrep.call_args[1]
+            # Empty list → None → full workspace scan
+            assert call_kwargs.get("target_files") is None
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_diff_tool_cache_prepopulated(
+        self, mock_agent, mock_run,
+    ):
+        """FetchPRDiffTool._files_cache pre-populated to avoid duplicate API call."""
+        mock_run.return_value = dict(_EMPTY_ANALYSIS)
+
+        engine = DecisionEngine()
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff, \
+             patch("src.tools._fetch_pr_files_from_api") as mock_fetch:
+            pr_files = [
+                {"filename": "app.py", "status": "modified", "patch": "..."},
+            ]
+            mock_fetch.return_value = (pr_files, None)
+
+            mock_st = MagicMock()
+            mock_st._call_count = 0
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st._last_error = ""
+            mock_st.workspace_path = "/tmp/workspace"
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(_make_context(), _make_triage())
+
+            # Diff tool cache should be pre-populated
+            assert mock_dt._files_cache == pr_files
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_no_pr_context_full_workspace(
+        self, mock_agent, mock_run,
+    ):
+        """Without PR context (no token), no API call, full workspace scan."""
+        mock_run.return_value = dict(_EMPTY_ANALYSIS)
+
+        engine = DecisionEngine()
+        ctx = _make_context(token="", pr_number=None, is_pull_request=False)
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools._fetch_pr_files_from_api") as mock_fetch:
+            mock_st = MagicMock()
+            mock_st._call_count = 0
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st._last_error = ""
+            mock_st.workspace_path = "/tmp/workspace"
+            MockSemgrep.return_value = mock_st
+
+            engine._run_analyzer(ctx, _make_triage())
+
+            # No API call when no PR context
+            mock_fetch.assert_not_called()
+            call_kwargs = MockSemgrep.call_args[1]
+            assert call_kwargs.get("target_files") is None

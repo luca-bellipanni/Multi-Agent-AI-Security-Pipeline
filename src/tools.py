@@ -519,9 +519,17 @@ class SemgrepTool(Tool):
     }
     output_type = "string"
 
-    def __init__(self, workspace_path: str, timeout: int = SEMGREP_TIMEOUT, **kwargs):
+    def __init__(
+        self,
+        workspace_path: str,
+        timeout: int = SEMGREP_TIMEOUT,
+        target_files: list[str] | None = None,
+        **kwargs,
+    ):
         self.workspace_path = workspace_path
         self.timeout = timeout
+        # PR-scoped scan: if set, only scan these files (relative paths)
+        self._target_files: list[str] = target_files or []
         # Side channel for the gate (LLM05: raw findings independent of agent)
         # Per-call (reset each forward()):
         self._last_raw_findings: list[Finding] = []
@@ -607,7 +615,23 @@ class SemgrepTool(Tool):
         cmd = ["semgrep", "--json", "--quiet"]
         for rs in rulesets:
             cmd.extend(["--config", rs])
-        cmd.append(self.workspace_path)
+
+        # PR-scoped scan: target specific files instead of entire workspace
+        if self._target_files:
+            for tf in self._target_files:
+                # Security: reject path traversal and absolute paths
+                if ".." in tf or os.path.isabs(tf):
+                    continue
+                filepath = os.path.join(self.workspace_path, tf)
+                if os.path.isfile(filepath):
+                    cmd.append(filepath)
+            # Fallback: if no valid target files exist, scan workspace
+            n_flags = 3 + 2 * len(rulesets)  # semgrep + --json + --quiet + configs
+            if len(cmd) == n_flags:
+                cmd.append(self.workspace_path)
+        else:
+            cmd.append(self.workspace_path)
+
         self._last_cmd = list(cmd)
 
         try:

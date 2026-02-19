@@ -1447,3 +1447,93 @@ class TestSemgrepExecuteDiagnostics:
         tool = SemgrepTool(workspace_path="/tmp")
         tool.forward("p/python")
         assert tool._last_stderr == "Fatal error occurred"
+
+
+# --- Semgrep: PR-scoped target files ---
+
+class TestSemgrepTargetFiles:
+    """Test PR-scoped scanning via target_files parameter."""
+
+    def test_no_target_files_by_default(self):
+        tool = SemgrepTool(workspace_path="/tmp")
+        assert tool._target_files == []
+
+    def test_target_files_stored(self):
+        tool = SemgrepTool(
+            workspace_path="/tmp",
+            target_files=["src/app.py", "src/utils.py"],
+        )
+        assert tool._target_files == ["src/app.py", "src/utils.py"]
+
+    @patch("src.tools.subprocess.run")
+    @patch("os.path.isfile", return_value=True)
+    def test_target_files_passed_to_semgrep(self, mock_isfile, mock_run):
+        """With target_files, Semgrep gets individual file paths, not workspace."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(
+            workspace_path="/workspace",
+            target_files=["src/app.py", "tests/test_app.py"],
+        )
+        tool.forward("p/python")
+
+        cmd = mock_run.call_args[0][0]
+        assert "/workspace/src/app.py" in cmd
+        assert "/workspace/tests/test_app.py" in cmd
+        # workspace dir should NOT be a target
+        assert "/workspace" not in cmd or all(
+            c.startswith("/workspace/") for c in cmd if c.startswith("/workspace")
+        )
+
+    @patch("src.tools.subprocess.run")
+    @patch("os.path.isfile", return_value=True)
+    def test_target_files_rejects_path_traversal(self, mock_isfile, mock_run):
+        """Files with '..' or absolute paths are rejected (security)."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(
+            workspace_path="/workspace",
+            target_files=["../etc/passwd", "/etc/shadow", "src/app.py"],
+        )
+        tool.forward("p/python")
+
+        cmd = mock_run.call_args[0][0]
+        # Only safe file should be included
+        assert "/workspace/src/app.py" in cmd
+        assert "/workspace/../etc/passwd" not in cmd
+        assert "/etc/shadow" not in cmd
+
+    @patch("src.tools.subprocess.run")
+    @patch("os.path.isfile", return_value=False)
+    def test_target_files_nonexistent_fallback(self, mock_isfile, mock_run):
+        """When no target files exist on disk, fallback to workspace scan."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(
+            workspace_path="/workspace",
+            target_files=["deleted_file.py"],
+        )
+        tool.forward("p/python")
+
+        cmd = mock_run.call_args[0][0]
+        # Fallback to workspace
+        assert cmd[-1] == "/workspace"
+
+    @patch("src.tools.subprocess.run")
+    def test_no_target_files_scans_workspace(self, mock_run):
+        """Without target_files, entire workspace is scanned (default)."""
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="", returncode=0,
+        )
+        tool = SemgrepTool(workspace_path="/workspace")
+        tool.forward("p/python")
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[-1] == "/workspace"
