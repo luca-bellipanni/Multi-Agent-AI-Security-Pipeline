@@ -96,15 +96,17 @@ class TestFormatComment:
         assert "`fetch_pr_files` x1" in body
         assert "`run_semgrep` x2" in body
 
-    def test_confirmed_findings_table(self):
+    def test_findings_table(self):
         d = _make_decision()
         body = format_comment(d)
-        assert "### Confirmed Findings (1)" in body
+        assert "### Findings (1)" in body
         assert "Fabc123" in body
         assert "HIGH" in body
         assert "`python.sql-injection`" in body
         assert "`src/db.py`" in body
         assert "42" in body
+        assert "Source" in body
+        assert "agent" in body
 
     def test_confirmed_details_collapsible(self):
         d = _make_decision()
@@ -113,22 +115,45 @@ class TestFormatComment:
         assert "User input in query" in body
         assert "Use parameterized queries" in body
 
-    def test_safety_warnings_section(self):
-        d = _make_decision(safety_warnings=[{
-            "type": "dismissed_high_severity",
-            "rule_id": "bad.rule",
+    def test_safety_net_note_shown(self):
+        """Safety-net note shown when findings have source=safety-net."""
+        d = _make_decision(confirmed_findings=[{
+            "finding_id": "Fxyz",
+            "rule_id": "missed.rule",
+            "path": "app.py",
+            "line": 10,
             "severity": "high",
-            "message": "Agent dismissed HIGH finding",
+            "message": "missed",
+            "agent_reason": "",
+            "agent_recommendation": "",
+            "source": "safety-net",
         }])
         body = format_comment(d)
-        assert "Safety Warnings (1)" in body
-        assert "dismissed_high_severity" in body
-        assert "`bad.rule`" in body
+        assert "Safety net" in body
+        assert "safety-net" in body
+        assert "1 finding(s)" in body
 
-    def test_no_safety_warnings_no_section(self):
+    def test_no_safety_net_no_note(self):
+        """No safety-net note when all findings are agent-confirmed."""
         d = _make_decision(safety_warnings=[])
         body = format_comment(d)
-        assert "Safety Warnings" not in body
+        assert "Safety net" not in body
+
+    def test_safety_net_details_fallback_reason(self):
+        """Safety-net findings get default reason in collapsible details."""
+        d = _make_decision(confirmed_findings=[{
+            "finding_id": "Fxyz",
+            "rule_id": "missed.rule",
+            "path": "app.py",
+            "line": 10,
+            "severity": "high",
+            "message": "missed",
+            "agent_reason": "",
+            "agent_recommendation": "",
+            "source": "safety-net",
+        }])
+        body = format_comment(d)
+        assert "Flagged by safety net" in body
 
     def test_excepted_findings_collapsible(self):
         d = _make_decision(excepted_findings=[{
@@ -183,7 +208,7 @@ class TestFormatComment:
         body = format_comment(d)
         assert "ALLOWED" in body
         assert "0 finding(s)" in body
-        assert "Confirmed Findings" not in body
+        assert "### Findings" not in body
 
     def test_no_trace(self):
         d = _make_decision(trace=[])
@@ -194,6 +219,25 @@ class TestFormatComment:
         d = _make_decision(verdict=Verdict.BLOCKED)
         body = format_comment(d)
         assert "BLOCKED" in body
+
+    def test_next_steps_shown_with_findings(self):
+        """Next steps section shown when there are findings."""
+        d = _make_decision()
+        body = format_comment(d)
+        assert "### Next steps" in body
+        assert "/dismiss F<id>" in body
+        assert "/remediate" in body
+
+    def test_next_steps_hidden_clean_scan(self):
+        """No next steps section when scan is clean."""
+        d = _make_decision(
+            verdict=Verdict.ALLOWED,
+            findings_count=0,
+            confirmed_findings=[],
+            safety_warnings=[],
+        )
+        body = format_comment(d)
+        assert "### Next steps" not in body
 
 
 # --- _format_tools_used ---

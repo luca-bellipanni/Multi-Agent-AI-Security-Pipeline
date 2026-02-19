@@ -48,19 +48,27 @@ def format_comment(decision: Decision) -> str:
             )
         lines.append("")
 
-    # Confirmed findings
+    # Findings table (confirmed + safety-net, unified)
     if decision.confirmed_findings:
-        lines.append(f"### Confirmed Findings ({len(decision.confirmed_findings)})")
+        lines.append(
+            f"### Findings ({len(decision.confirmed_findings)})"
+        )
         lines.append("")
-        lines.append("| ID | Sev | Rule | File | Line |")
-        lines.append("|----|-----|------|------|------|")
+        lines.append("| ID | Sev | Rule | File | Line | Source |")
+        lines.append("|----|-----|------|------|------|--------|")
         for f in decision.confirmed_findings:
             fid = f.get("finding_id", "?")
             sev = f.get("severity", "?").upper()
             rule = f"`{f.get('rule_id', '?')}`"
             path = f"`{f.get('path', '?')}`"
             line = f.get("line", "?")
-            lines.append(f"| {fid} | {sev} | {rule} | {path} | {line} |")
+            source = f.get("source", "confirmed")
+            src_label = ("agent" if source == "confirmed"
+                         else "safety-net")
+            lines.append(
+                f"| {fid} | {sev} | {rule} | {path} | {line} "
+                f"| {src_label} |"
+            )
         lines.append("")
 
         # Details (collapsible)
@@ -73,6 +81,10 @@ def format_comment(decision: Decision) -> str:
             line = f.get("line", "?")
             lines.append(f"**[{sev}] {rule}** at `{path}:{line}`")
             reason = f.get("agent_reason", "")
+            source = f.get("source", "confirmed")
+            if not reason and source == "safety-net":
+                reason = ("Flagged by safety net "
+                          "(agent did not confirm this finding)")
             if reason:
                 lines.append(f"- Analysis: {reason}")
             rec = f.get("agent_recommendation", "")
@@ -82,19 +94,19 @@ def format_comment(decision: Decision) -> str:
         lines.append("</details>")
         lines.append("")
 
-    # Safety warnings
-    if decision.safety_warnings:
-        lines.append(
-            f"### Safety Warnings ({len(decision.safety_warnings)})"
+        # Safety-net explanation (brief note under table)
+        safety_count = sum(
+            1 for f in decision.confirmed_findings
+            if f.get("source") == "safety-net"
         )
-        lines.append("")
-        for w in decision.safety_warnings:
-            wtype = w.get("type", "unknown")
-            rule = w.get("rule_id", "?")
-            sev = w.get("severity", "?").upper()
-            msg = w.get("message", "")
-            lines.append(f"- **{wtype}**: [{sev}] `{rule}` — {msg}")
-        lines.append("")
+        if safety_count:
+            lines.append(
+                f"> **Safety net**: {safety_count} finding(s) marked "
+                f"`safety-net` are HIGH/CRITICAL issues the AI agent "
+                f"missed or dismissed. Included automatically as "
+                f"precaution — review required."
+            )
+            lines.append("")
 
     # Excepted findings (collapsible)
     if decision.excepted_findings:
@@ -127,6 +139,23 @@ def format_comment(decision: Decision) -> str:
             lines.append(f"- `{rule}` — {reason}")
         lines.append("")
         lines.append("</details>")
+        lines.append("")
+
+    # Next steps (only when there are findings)
+    if decision.confirmed_findings:
+        lines.append("### Next steps")
+        lines.append("")
+        lines.append(
+            "1. **Review** each finding in the table above"
+        )
+        lines.append(
+            "2. **Dismiss** a false positive by commenting: "
+            "`/dismiss F<id> <reason>`"
+        )
+        lines.append(
+            "3. **Auto-fix** confirmed findings by commenting: "
+            "`/remediate`"
+        )
         lines.append("")
 
     # Footer

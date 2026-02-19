@@ -438,12 +438,12 @@ class TestGateUsesRawFindings:
     uses safety net to catch dismissed HIGH/CRITICAL, and prevents
     hallucinated findings from driving the verdict."""
 
-    def test_agent_dismisses_critical_safety_net_fires(self):
-        """Agent dismisses CRITICAL → safety net fires → MANUAL_REVIEW.
+    def test_agent_dismisses_critical_safety_net_blocks(self):
+        """Agent dismisses CRITICAL → safety net fires → BLOCKED.
 
-        The safety net catches the dismissal and forces human review.
-        The gate does NOT auto-block because the agent might be correct
-        (e.g. test file), but requires a human to verify.
+        The safety net catches the dismissal and includes the CRITICAL
+        in effective_findings. CRITICAL always auto-blocks per policy,
+        regardless of agent opinion.
         """
         engine = DecisionEngine()
         raw = [_make_finding(Severity.CRITICAL, rule_id="critical.vuln")]
@@ -457,7 +457,7 @@ class TestGateUsesRawFindings:
         d = engine._apply_gate(
             _make_context(mode="enforce"), _make_triage(), [tr], analysis,
         )
-        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert d.verdict == Verdict.BLOCKED
         assert len(d.safety_warnings) == 1
 
     def test_agent_confirms_all_gate_agrees(self):
@@ -1353,6 +1353,32 @@ class TestBuildConfirmedStructured:
         result = self._build([], {"confirmed": []})
         assert result == []
 
+    def test_source_confirmed_default(self):
+        """Without safety_warnings, source defaults to 'confirmed'."""
+        findings = [_make_finding(Severity.HIGH, rule_id="sqli")]
+        analysis = {
+            "confirmed": [{"rule_id": "sqli", "severity": "HIGH"}],
+        }
+        result = self._build(findings, analysis)
+        assert result[0]["source"] == "confirmed"
+
+    def test_source_safety_net(self):
+        """With safety_warnings, unconfirmed rule_ids get 'safety-net'."""
+        engine = DecisionEngine()
+        findings = [
+            _make_finding(Severity.HIGH, rule_id="confirmed.r"),
+            _make_finding(Severity.HIGH, rule_id="missed.r"),
+        ]
+        analysis = {
+            "confirmed": [{"rule_id": "confirmed.r", "severity": "HIGH"}],
+        }
+        warnings = [{"rule_id": "missed.r", "severity": "high"}]
+        result = engine._build_confirmed_structured(
+            findings, analysis, warnings,
+        )
+        assert result[0]["source"] == "confirmed"
+        assert result[1]["source"] == "safety-net"
+
 
 # --- Structured findings on Decision ---
 
@@ -1988,8 +2014,8 @@ class TestSmartGateSummaryPrint:
         assert "agent confirmed 2 finding(s)" in out
         assert "none matched scanner results" in out
 
-    def test_safety_net_legend_printed(self, capsys):
-        """Safety net legend printed when warnings exist."""
+    def test_gate_summary_with_safety_net(self, capsys):
+        """Gate summary shows confirmed + safety-net breakdown."""
         raw = [
             _make_finding(Severity.HIGH, rule_id="r1"),
             _make_finding(Severity.HIGH, rule_id="r2"),
@@ -2005,8 +2031,8 @@ class TestSmartGateSummaryPrint:
         }
         self._gate(raw, analysis, mode="enforce")
         out = capsys.readouterr().out
-        assert "safety-net = 1 HIGH/CRITICAL" in out
-        assert "agent missed" in out
+        assert "Gate: 2 finding(s)" in out
+        assert "1 confirmed + 1 safety-net" in out
 
     def test_findings_table_printed(self, capsys):
         """Findings table printed with all raw findings and verdicts."""
@@ -2084,3 +2110,99 @@ class TestSmartGateSummaryPrint:
         assert "1 high" in d.reason
         assert "1 low" in d.reason
         assert "Shadow mode:" in d.reason
+
+    def test_findings_count_includes_safety_net(self, capsys):
+        """findings_count includes both confirmed and safety-net findings."""
+        raw = [
+            _make_finding(Severity.HIGH, rule_id="r1"),
+            _make_finding(Severity.HIGH, rule_id="r2"),
+            _make_finding(Severity.HIGH, rule_id="r3"),
+        ]
+        analysis = {
+            "confirmed": [{"rule_id": "r1", "severity": "HIGH"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+            "summary": "found",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        d = self._gate(raw, analysis, mode="shadow")
+        # 1 confirmed + 2 safety-net = 3 total
+        assert d.findings_count == 3
+
+    def test_confirmed_structured_has_source_field(self, capsys):
+        """confirmed_findings entries have 'source' field."""
+        raw = [
+            _make_finding(Severity.HIGH, rule_id="r1"),
+            _make_finding(Severity.HIGH, rule_id="r2"),
+        ]
+        analysis = {
+            "confirmed": [{"rule_id": "r1", "severity": "HIGH"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+            "summary": "found",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        d = self._gate(raw, analysis, mode="shadow")
+        sources = {f["source"] for f in d.confirmed_findings}
+        assert "confirmed" in sources
+        assert "safety-net" in sources
+
+    def test_safety_net_critical_blocks_enforce(self, capsys):
+        """Safety-net CRITICAL finding → BLOCKED in enforce mode."""
+        raw = [
+            _make_finding(Severity.CRITICAL, rule_id="critical.vuln"),
+        ]
+        # Agent analyzed but missed the CRITICAL
+        analysis = {
+            "confirmed": [],
+            "dismissed": [],
+            "findings_analyzed": 1,
+            "summary": "clean",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        d = self._gate(raw, analysis, mode="enforce")
+        assert d.verdict == Verdict.BLOCKED
+        assert d.findings_count == 1
+        assert d.confirmed_findings[0]["source"] == "safety-net"
+
+    def test_safety_net_high_manual_review_enforce(self, capsys):
+        """Safety-net HIGH finding → MANUAL_REVIEW in enforce mode."""
+        raw = [
+            _make_finding(Severity.HIGH, rule_id="high.vuln"),
+        ]
+        # Agent analyzed but missed the HIGH
+        analysis = {
+            "confirmed": [],
+            "dismissed": [],
+            "findings_analyzed": 1,
+            "summary": "clean",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        d = self._gate(raw, analysis, mode="enforce")
+        assert d.verdict == Verdict.MANUAL_REVIEW
+        assert d.findings_count == 1
+
+    def test_gate_summary_zero_safety_net(self, capsys):
+        """Gate summary shows 0 safety-net when none present."""
+        raw = [_make_finding(Severity.HIGH, rule_id="r1")]
+        analysis = {
+            "confirmed": [{"rule_id": "r1", "severity": "HIGH"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+            "summary": "found",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        self._gate(raw, analysis, mode="shadow")
+        out = capsys.readouterr().out
+        assert "Gate: 1 finding(s)" in out
+        assert "1 confirmed + 0 safety-net" in out

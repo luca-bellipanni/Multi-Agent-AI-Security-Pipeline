@@ -101,7 +101,7 @@ class DecisionEngine:
                 traces.append(StepTrace(
                     name="AppSec Agent (OODA)",
                     tools_used=analyzer_tools,
-                    summary=f"{raw_count} raw -> {confirmed_count} confirmed",
+                    summary=f"{raw_count} raw, agent confirmed {confirmed_count}",
                     status="success",
                 ))
         except Exception:
@@ -394,9 +394,8 @@ class DecisionEngine:
                     "path": finding.path,
                     "line": finding.line,
                     "message": (
-                        f"Agent dismissed {finding.severity.value} finding "
-                        f"{finding.rule_id} at {finding.path}:{finding.line}. "
-                        f"Safety net: this finding is included in the verdict."
+                        f"Agent dismissed {finding.severity.value} "
+                        f"finding — included by safety net"
                     ),
                 })
             elif finding.rule_id not in confirmed_rule_ids:
@@ -407,10 +406,8 @@ class DecisionEngine:
                     "path": finding.path,
                     "line": finding.line,
                     "message": (
-                        f"Agent did not account for {finding.severity.value} "
-                        f"finding {finding.rule_id} at "
-                        f"{finding.path}:{finding.line}. "
-                        f"Safety net: this finding is included in the verdict."
+                        f"{finding.severity.value} finding not confirmed "
+                        f"by agent — included by safety net"
                     ),
                 })
 
@@ -540,11 +537,13 @@ class DecisionEngine:
         self,
         effective_findings: list[Finding],
         agent_analysis: dict,
+        safety_warnings: list[dict] | None = None,
     ) -> list[dict]:
-        """Build structured confirmed findings for PR report / scan-results.
+        """Build structured findings for PR report / scan-results.
 
         Merges raw Finding data (gate-validated) with agent analysis context
         (reason, recommendation). Severity always from raw.
+        Each entry gets a "source" field: "confirmed" or "safety-net".
         """
         # Agent context by rule_id (for reason/recommendation)
         agent_by_rule: dict[str, dict] = {}
@@ -552,9 +551,21 @@ class DecisionEngine:
             if isinstance(c, dict) and isinstance(c.get("rule_id"), str):
                 agent_by_rule[c["rule_id"]] = c
 
+        # Safety-net rule_ids (not confirmed by agent)
+        safety_rule_ids: set[str] = set()
+        if safety_warnings:
+            safety_rule_ids = {
+                w["rule_id"] for w in safety_warnings
+                if isinstance(w, dict)
+                and isinstance(w.get("rule_id"), str)
+            }
+        confirmed_rule_ids = set(agent_by_rule.keys())
+
         result = []
         for f in effective_findings:
             agent_ctx = agent_by_rule.get(f.rule_id, {})
+            is_safety = (f.rule_id in safety_rule_ids
+                         and f.rule_id not in confirmed_rule_ids)
             result.append({
                 "finding_id": f.finding_id,
                 "rule_id": f.rule_id,
@@ -564,6 +575,7 @@ class DecisionEngine:
                 "message": f.message,
                 "agent_reason": agent_ctx.get("reason", ""),
                 "agent_recommendation": agent_ctx.get("recommendation", ""),
+                "source": "safety-net" if is_safety else "confirmed",
             })
         return result
 
@@ -796,7 +808,26 @@ class DecisionEngine:
                 active_findings, agent_analysis,
             )
             safety_warnings.extend(sev_mismatches)
+
+            # Include safety-net findings in effective_findings
+            # (they ARE part of the verdict — not just informational)
             if safety_warnings:
+                safety_rule_ids = {
+                    w["rule_id"] for w in safety_warnings
+                    if isinstance(w, dict)
+                    and isinstance(w.get("rule_id"), str)
+                }
+                already = {
+                    (f.rule_id, f.path, f.line)
+                    for f in effective_findings
+                }
+                for f in active_findings:
+                    key = (f.rule_id, f.path, f.line)
+                    if (f.rule_id in safety_rule_ids
+                            and key not in already):
+                        effective_findings.append(f)
+                        already.add(key)
+
                 print(
                     f"::warning::Safety net triggered: "
                     f"{len(safety_warnings)} HIGH/CRITICAL finding(s) "
@@ -848,26 +879,36 @@ class DecisionEngine:
             eff_counts[f.severity] += 1
 
         findings_count = len(effective_findings)
+        raw_count = len(raw_findings)
 
         # Smart Gate summary (always visible in CI logs)
-        raw_count = len(raw_findings)
-        confirmed_rules = len({
+        confirmed_rule_ids_gate = {
             c["rule_id"] for c in agent_analysis.get("confirmed", [])
             if isinstance(c, dict) and isinstance(c.get("rule_id"), str)
-        })
-        if confirmed_rules > 0 and findings_count == 0:
-            print(f"  Warning: agent confirmed {confirmed_rules} finding(s) "
-                  f"but none matched scanner results")
-        if safety_warnings:
-            print(f"  * safety-net = {len(safety_warnings)} HIGH/CRITICAL "
-                  f"finding(s) the agent missed — included as precaution")
+        }
+        n_agent = sum(
+            1 for f in effective_findings
+            if f.rule_id in confirmed_rule_ids_gate
+        )
+        n_safety = findings_count - n_agent
+
+        # Anti-hallucination warning
+        if confirmed_rule_ids_gate and n_agent == 0:
+            print(
+                f"  Warning: agent confirmed "
+                f"{len(confirmed_rule_ids_gate)} finding(s) "
+                f"but none matched scanner results"
+            )
+
+        print(f"\n  Gate: {findings_count} finding(s) "
+              f"({n_agent} confirmed + {n_safety} safety-net)")
         print(f"  Mode: {ctx.mode}")
 
         excepted_count = len(excepted_info)
 
         # Build structured findings lists for PR reporting
         confirmed_structured = self._build_confirmed_structured(
-            effective_findings, agent_analysis,
+            effective_findings, agent_analysis, safety_warnings,
         )
         dismissed_structured = agent_analysis.get("dismissed", [])
         excepted_structured = excepted_info
@@ -925,7 +966,16 @@ class DecisionEngine:
                 f"MANUAL_REVIEW — tool(s) failed: {', '.join(failed)}. "
                 f"Triage: {ai_reason}"
             )
-        # 2. Safety net override: agent dismissed/ignored HIGH/CRITICAL
+        # 2. CRITICAL in effective findings → auto-BLOCKED
+        #    (covers both agent-confirmed and safety-net CRITICAL)
+        elif eff_counts.get(Severity.CRITICAL, 0) > 0:
+            verdict = Verdict.BLOCKED
+            continue_pipeline = False
+            reason = (
+                f"BLOCKED — {eff_counts[Severity.CRITICAL]} critical "
+                f"finding(s). Auto-blocked per policy."
+            )
+        # 3. Safety net override: agent dismissed/ignored HIGH
         elif safety_warnings:
             verdict = Verdict.MANUAL_REVIEW
             continue_pipeline = False
@@ -933,14 +983,6 @@ class DecisionEngine:
                 f"MANUAL_REVIEW — {len(safety_warnings)} safety warning(s): "
                 f"agent dismissed or missed HIGH/CRITICAL "
                 f"finding(s). Human review required."
-            )
-        # 3. Confirmed CRITICAL → auto-BLOCKED
-        elif eff_counts.get(Severity.CRITICAL, 0) > 0:
-            verdict = Verdict.BLOCKED
-            continue_pipeline = False
-            reason = (
-                f"BLOCKED — {eff_counts[Severity.CRITICAL]} confirmed "
-                f"critical finding(s). Auto-blocked per policy."
             )
         # 4. Any confirmed findings → MANUAL_REVIEW
         elif findings_count > 0:
