@@ -389,13 +389,34 @@ class DecisionEngine:
 
         try:
             from src.analyzer_agent import create_analyzer_agent, run_analyzer
-            from src.tools import FetchPRDiffTool, SemgrepTool
+            from src.tools import (
+                FetchPRDiffTool, SemgrepTool, _fetch_pr_files_from_api,
+            )
             from src.observability import make_step_logger, run_with_timeout
 
             print("Running AppSec Agent (OODA loop)...")
 
+            # Fetch PR file list for scoped scanning
+            pr_filenames: list[str] = []
+            pr_files_raw: list[dict] = []
+            if ctx.token and ctx.repository and ctx.pr_number:
+                pr_files_raw, api_err = _fetch_pr_files_from_api(
+                    ctx.token, ctx.repository, ctx.pr_number,
+                )
+                if not api_err:
+                    pr_filenames = [
+                        f["filename"] for f in pr_files_raw
+                        if f.get("status") != "removed"
+                    ]
+                    print(f"  PR scope: {len(pr_filenames)} file(s)")
+                else:
+                    print(f"  PR scope: full workspace (API: {api_err})")
+
             # Create tools — we keep refs for the side channel + call counting
-            semgrep_tool = SemgrepTool(workspace_path=ctx.workspace)
+            semgrep_tool = SemgrepTool(
+                workspace_path=ctx.workspace,
+                target_files=pr_filenames or None,
+            )
             diff_tool = None
             tools = [semgrep_tool]
 
@@ -406,6 +427,9 @@ class DecisionEngine:
                     repository=ctx.repository,
                     pr_number=ctx.pr_number,
                 )
+                # Pre-populate cache to avoid duplicate API call
+                if pr_files_raw:
+                    diff_tool._files_cache = pr_files_raw
                 tools.append(diff_tool)
 
             callback = make_step_logger("AppSec", max_seconds=600)
@@ -1109,10 +1133,17 @@ class DecisionEngine:
                 short = (rid.rsplit(".", 1)[-1] if "." in rid
                          else rid)
                 _confirmed_keys.add((short, ln))
+        def _dismissed_overlaps(d: dict) -> bool:
+            rid = d.get("rule_id", "")
+            ln = d.get("line", 0)
+            if (rid, ln) in _confirmed_keys:
+                return True
+            short = rid.rsplit(".", 1)[-1] if "." in rid else rid
+            return (short, ln) in _confirmed_keys
+
         dismissed_structured = [
             d for d in agent_analysis.get("dismissed", [])
-            if (d.get("rule_id", ""), d.get("line", 0))
-            not in _confirmed_keys
+            if not _dismissed_overlaps(d)
         ]
         excepted_structured = excepted_info
 
