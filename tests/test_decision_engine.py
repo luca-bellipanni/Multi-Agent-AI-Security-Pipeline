@@ -1632,12 +1632,12 @@ class TestAnalyzerDiagnosticsPrint:
             assert "Analysis: 5 analyzed" in out
             assert "2 vulnerabilities confirmed," in out
             assert "1 dismissed" in out
-            # Agent reasoning
+            # Agent reasoning (short rule, no severity labels)
             assert "Confirmed:" in out
-            assert "[HIGH] r1" in out
-            assert "[MEDIUM] r2" in out
+            assert "- r1: SQL injection found" in out
+            assert "- r2: Path traversal" in out
             assert "Dismissed:" in out
-            assert "r3 -- false positive" in out
+            assert "- r3: false positive" in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -1684,11 +1684,10 @@ class TestAnalyzerDiagnosticsPrint:
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
             assert "Confirmed:" in out
-            assert "[HIGH] sql-injection" in out
-            assert "User input in SQL query" in out
+            assert "- sql-injection: User input in SQL query" in out
             assert "Dismissed:" in out
-            assert "noise-rule" in out
-            # Long reason truncated
+            assert "- noise-rule:" in out
+            # Long reason truncated at word boundary
             assert "..." in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
@@ -1732,8 +1731,7 @@ class TestAnalyzerDiagnosticsPrint:
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
             assert "Confirmed:" in out
-            assert "[MEDIUM] xss" in out
-            assert "Reflected XSS" in out
+            assert "- xss: Reflected XSS" in out
             assert "Dismissed:" not in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
@@ -2217,13 +2215,36 @@ class TestSmartGateSummaryPrint:
         assert "dismissed" in out
         assert "Summary:" in out
 
-    def test_noise_has_default_reason(self, capsys):
-        """Noise findings show 'not flagged by agent' as default reason."""
+    def test_noise_shows_not_analyzed(self, capsys):
+        """Noise findings show 'not analyzed by agent' as reason."""
         raw = [_make_finding(Severity.LOW, rule_id="noise.rule",
                              path="x.py", line=1)]
         self._gate(raw, _empty_analysis(), mode="shadow")
         out = capsys.readouterr().out
-        assert "not flagged by agent" in out
+        assert "not analyzed by agent" in out
+
+    def test_dismissed_shows_agent_reason(self, capsys):
+        """Dismissed findings show agent's dismissal reason in table."""
+        raw = [
+            _make_finding(Severity.MEDIUM, rule_id="style.rule",
+                          path="app.py", line=5),
+        ]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [
+                {"rule_id": "style.rule", "severity": "MEDIUM",
+                 "reason": "duplicate: covered by sql-injection at same line"},
+            ],
+            "findings_analyzed": 1,
+            "summary": "clean",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        self._gate(raw, analysis, mode="shadow")
+        out = capsys.readouterr().out
+        assert "duplicate: covered by sql-injection" in out
+        assert "dismissed" in out
 
     def test_safety_net_has_default_reason(self, capsys):
         """Safety-net findings show default reason in table."""
@@ -2240,7 +2261,7 @@ class TestSmartGateSummaryPrint:
         }
         self._gate(raw, analysis, mode="enforce")
         out = capsys.readouterr().out
-        assert "HIGH/CRITICAL not confirmed" in out
+        assert "HIGH/CRITICAL not confirmed by agent" in out
 
     def test_shadow_reason_has_severity_breakdown(self, capsys):
         """Shadow mode reason includes severity breakdown."""

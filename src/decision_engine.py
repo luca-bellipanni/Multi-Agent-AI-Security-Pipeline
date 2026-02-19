@@ -46,6 +46,23 @@ _EMPTY_ANALYSIS = {
 }
 
 
+def _truncate_reason(text: str, max_len: int = 80) -> str:
+    """Truncate reason at word boundary, ending at sentence if possible."""
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    # Try to end at first sentence
+    dot = text.find(".")
+    if 0 < dot < max_len:
+        return text[:dot + 1]
+    # Truncate at word boundary
+    cut = text[:max_len].rfind(" ")
+    if cut > max_len // 3:
+        return text[:cut] + "..."
+    return text[:max_len] + "..."
+
+
 class DecisionEngine:
 
     _memory_store: MemoryStore | None = None
@@ -287,7 +304,7 @@ class DecisionEngine:
                   f" → {n_confirmed} vulnerabilities confirmed,"
                   f" {n_dismissed} dismissed")
 
-            # Agent reasoning per finding
+            # Agent reasoning per finding (concise, no severity labels)
             confirmed_list = analysis.get("confirmed", [])
             if confirmed_list:
                 print("  Confirmed:")
@@ -295,13 +312,14 @@ class DecisionEngine:
                     if not isinstance(c, dict):
                         continue
                     rule = c.get("rule_id", "?")
-                    sev = c.get("severity", "?").upper()
+                    short_rule = (rule.rsplit(".", 1)[-1]
+                                  if "." in rule else rule)
                     reason = c.get("reason", "")
-                    short = (reason[:120] + "..."
-                             if len(reason) > 120 else reason)
-                    print(f"    [{sev}] {rule}")
+                    short = _truncate_reason(reason, 100)
                     if short:
-                        print(f"          {short}")
+                        print(f"    - {short_rule}: {short}")
+                    else:
+                        print(f"    - {short_rule}")
 
             dismissed_list = analysis.get("dismissed", [])
             if dismissed_list:
@@ -310,10 +328,11 @@ class DecisionEngine:
                     if not isinstance(d, dict):
                         continue
                     rule = d.get("rule_id", "?")
+                    short_rule = (rule.rsplit(".", 1)[-1]
+                                  if "." in rule else rule)
                     reason = d.get("reason", "no reason")
-                    short = (reason[:120] + "..."
-                             if len(reason) > 120 else reason)
-                    print(f"    {rule} -- {short}")
+                    short = _truncate_reason(reason, 100)
+                    print(f"    - {short_rule}: {short}")
 
             # Essential diagnostics (always shown)
             print(f"  Semgrep: {semgrep_tool._call_count} scan(s), "
@@ -490,10 +509,14 @@ class DecisionEngine:
         agent_reasons: dict[str, str] = {}
         for c in agent_analysis.get("confirmed", []):
             if isinstance(c, dict) and c.get("rule_id"):
-                agent_reasons[c["rule_id"]] = c.get("reason", "")[:80]
+                agent_reasons[c["rule_id"]] = _truncate_reason(
+                    c.get("reason", ""), 80,
+                )
         for d in agent_analysis.get("dismissed", []):
             if isinstance(d, dict) and d.get("rule_id"):
-                agent_reasons[d["rule_id"]] = d.get("reason", "")[:80]
+                agent_reasons[d["rule_id"]] = _truncate_reason(
+                    d.get("reason", ""), 80,
+                )
 
         # Deduplicate by rule_id+path+line for display
         seen: set[tuple[str, str, int]] = set()
@@ -524,9 +547,9 @@ class DecisionEngine:
             # Default reasons for verdicts without explicit agent reason
             if not reason:
                 if verdict == "noise":
-                    reason = "not flagged by agent"
+                    reason = "not analyzed by agent"
                 elif verdict == "safety-net":
-                    reason = "HIGH/CRITICAL not confirmed"
+                    reason = "HIGH/CRITICAL not confirmed by agent"
 
             rows.append((
                 f.severity.value.upper(), short_rule,

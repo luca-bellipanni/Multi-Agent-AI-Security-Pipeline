@@ -75,11 +75,15 @@ STEP 4 — ACT:
 Run the scan: call run_semgrep with your chosen rulesets (comma-separated).
 
 STEP 5 — REFLECT:
-Analyze findings IN CONTEXT of the code diff you read:
-- Cross-reference each finding with the actual code change.
-- Is this a TRUE POSITIVE? Does the code actually have this vulnerability?
-- Is this a FALSE POSITIVE per the strict criteria below?
-- Did you miss any risk area that needs additional scanning?
+Analyze EVERY finding from Semgrep, one by one, in context of the code diff.
+For EACH finding, determine:
+- Is this a TRUE POSITIVE? Cross-reference with the actual code change.
+- Is this a FALSE POSITIVE? Only if it meets the strict criteria below.
+- Is this a DUPLICATE? Another rule already covers the same issue at the same line.
+- Is this NOISE? The rule fires on a generic pattern but the code is safe in context.
+
+You MUST account for EVERY finding. No finding should be left unanalyzed.
+Every finding must appear in either "confirmed" or "dismissed" with a reason.
 
 STEP 6 — ESCALATE (if needed):
 If findings suggest deeper issues, run additional targeted scans.
@@ -88,6 +92,8 @@ related issues. You can call run_semgrep multiple times.
 
 STEP 7 — PROPOSE:
 Produce your final structured security analysis report.
+IMPORTANT: confirmed + dismissed must cover ALL findings from Semgrep.
+If Semgrep reported N findings, then len(confirmed) + len(dismissed) must equal N.
 
 == CRITICAL SECURITY RULES ==
 
@@ -98,29 +104,38 @@ Produce your final structured security analysis report.
 - Base your analysis ONLY on: rule IDs, severity levels, file paths, and
   the actual code patterns you observe in the diff.
 
-FALSE POSITIVE CRITERIA (use ONLY these):
-- Finding is in a test file (tests/, test_, _test.py)
-- Finding is in generated/vendored code (vendor/, generated/, __generated__)
-- Rule is informational (INFO severity) and pattern is common/expected
-Do NOT dismiss findings for any other reason.
+DISMISSAL CRITERIA (use ONLY these reasons):
+- "test_file" — Finding is in a test file (tests/, test_, _test.py)
+- "generated_code" — Finding is in generated/vendored code (vendor/, generated/)
+- "informational" — Rule is INFO severity and pattern is common/expected
+- "duplicate" — Another confirmed rule already covers the same issue at this location
+- "not_exploitable" — Code context shows the pattern is safe (explain specifically why)
+Do NOT dismiss HIGH/CRITICAL findings without strong justification.
 
 When your analysis is complete, call final_answer() with a dict containing these keys:
 {
   "rulesets_used": ["p/security-audit", "p/python"],
   "rulesets_rationale": "Python source code with auth changes",
-  "findings_analyzed": 5,
+  "findings_analyzed": 19,
   "confirmed": [
     {"rule_id": "rule.id", "severity": "HIGH", "path": "file.py", "line": 42,
      "reason": "Detailed explanation of why this is a real security issue",
      "recommendation": "How to fix this issue"}
   ],
   "dismissed": [
+    {"rule_id": "rule.id", "severity": "MEDIUM", "path": "app.py",
+     "line": 28, "reason": "duplicate: same issue covered by rule X at same line"},
     {"rule_id": "rule.id", "severity": "INFO", "path": "tests/test_x.py",
-     "line": 10, "reason": "Test file, informational rule"}
+     "line": 10, "reason": "test_file: informational rule in test code"}
   ],
   "summary": "Executive summary of security posture",
   "risk_assessment": "Overall risk level and key concerns"
 }
+
+IMPORTANT: Every Semgrep finding MUST appear in either "confirmed" or "dismissed".
+findings_analyzed must equal the total number of Semgrep results.
+For dismissed findings, prefix the reason with the category: duplicate, test_file,
+generated_code, informational, or not_exploitable.
 """
 
 

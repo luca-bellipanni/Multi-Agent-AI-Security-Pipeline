@@ -326,8 +326,14 @@ class TestAnalyzerSystemPromptSecurity:
     def test_prompt_forbids_dismissing_via_comments(self):
         assert "NEVER dismiss" in ANALYZER_SYSTEM_PROMPT
 
-    def test_prompt_has_false_positive_criteria(self):
-        assert "FALSE POSITIVE CRITERIA" in ANALYZER_SYSTEM_PROMPT
+    def test_prompt_has_dismissal_criteria(self):
+        assert "DISMISSAL CRITERIA" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_requires_all_findings_accounted(self):
+        """Agent must account for every finding (confirm or dismiss)."""
+        assert "EVERY finding" in ANALYZER_SYSTEM_PROMPT
+        assert "confirmed" in ANALYZER_SYSTEM_PROMPT
+        assert "dismissed" in ANALYZER_SYSTEM_PROMPT
 
     def test_prompt_mentions_test_files(self):
         assert "test file" in ANALYZER_SYSTEM_PROMPT.lower()
