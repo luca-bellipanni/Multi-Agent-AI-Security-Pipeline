@@ -296,6 +296,15 @@ class DecisionEngine:
             )
             print(f"AppSec Agent complete: {analysis.get('summary', 'N/A')}")
 
+            # Tool usage summary (BEFORE findings — narrative flow)
+            print(f"  Semgrep: {semgrep_tool._call_count} scan(s), "
+                  f"{len(semgrep_tool._all_raw_findings)} finding(s)")
+            if semgrep_tool._all_configs_used:
+                configs = ", ".join(semgrep_tool._all_configs_used)
+                print(f"  Configs: {configs}")
+            if diff_tool is not None and diff_tool._call_count > 0:
+                print(f"  PR diff: {diff_tool._call_count} call(s)")
+
             # Agent analysis breakdown
             n_confirmed = len(analysis.get("confirmed", []))
             n_dismissed = len(analysis.get("dismissed", []))
@@ -304,7 +313,7 @@ class DecisionEngine:
                   f" → {n_confirmed} vulnerabilities confirmed,"
                   f" {n_dismissed} dismissed")
 
-            # Agent reasoning per finding (concise, no severity labels)
+            # Agent reasoning per finding (with severity)
             confirmed_list = analysis.get("confirmed", [])
             if confirmed_list:
                 print("  Confirmed:")
@@ -314,12 +323,13 @@ class DecisionEngine:
                     rule = c.get("rule_id", "?")
                     short_rule = (rule.rsplit(".", 1)[-1]
                                   if "." in rule else rule)
+                    sev = c.get("severity", "?").upper()
                     reason = c.get("reason", "")
                     short = _truncate_reason(reason, 100)
                     if short:
-                        print(f"    - {short_rule}: {short}")
+                        print(f"    - [{sev}] {short_rule}: {short}")
                     else:
-                        print(f"    - {short_rule}")
+                        print(f"    - [{sev}] {short_rule}")
 
             dismissed_list = analysis.get("dismissed", [])
             if dismissed_list:
@@ -330,18 +340,10 @@ class DecisionEngine:
                     rule = d.get("rule_id", "?")
                     short_rule = (rule.rsplit(".", 1)[-1]
                                   if "." in rule else rule)
+                    sev = d.get("severity", "?").upper()
                     reason = d.get("reason", "no reason")
                     short = _truncate_reason(reason, 100)
-                    print(f"    - {short_rule}: {short}")
-
-            # Essential diagnostics (always shown)
-            print(f"  Semgrep: {semgrep_tool._call_count} scan(s), "
-                  f"{len(semgrep_tool._all_raw_findings)} finding(s)")
-            if semgrep_tool._all_configs_used:
-                configs = ", ".join(semgrep_tool._all_configs_used)
-                print(f"  Configs: {configs}")
-            if diff_tool is not None and diff_tool._call_count > 0:
-                print(f"  PR diff: {diff_tool._call_count} call(s)")
+                    print(f"    - [{sev}] {short_rule}: {short}")
             if semgrep_tool._all_scan_errors:
                 print(f"  Semgrep errors "
                       f"({len(semgrep_tool._all_scan_errors)}):")
@@ -505,17 +507,18 @@ class DecisionEngine:
             if isinstance(w, dict) and isinstance(w.get("rule_id"), str)
         }
 
-        # Agent reasons (keyed by rule_id for lookup)
-        agent_reasons: dict[str, str] = {}
+        # Separate reason dicts: confirmed vs dismissed (avoid overwrite)
+        confirmed_reasons: dict[str, str] = {}
         for c in agent_analysis.get("confirmed", []):
             if isinstance(c, dict) and c.get("rule_id"):
-                agent_reasons[c["rule_id"]] = _truncate_reason(
-                    c.get("reason", ""), 80,
+                confirmed_reasons[c["rule_id"]] = _truncate_reason(
+                    c.get("reason", ""), 60,
                 )
+        dismissed_reasons: dict[str, str] = {}
         for d in agent_analysis.get("dismissed", []):
             if isinstance(d, dict) and d.get("rule_id"):
-                agent_reasons[d["rule_id"]] = _truncate_reason(
-                    d.get("reason", ""), 80,
+                dismissed_reasons[d["rule_id"]] = _truncate_reason(
+                    d.get("reason", ""), 60,
                 )
 
         # Deduplicate by rule_id+path+line for display
@@ -543,8 +546,14 @@ class DecisionEngine:
                           if "." in f.rule_id else f.rule_id)
             short_path = (f.path.rsplit("/", 1)[-1]
                           if "/" in f.path else f.path)
-            reason = agent_reasons.get(f.rule_id, "")
-            # Default reasons for verdicts without explicit agent reason
+            # Use the right reason dict for the verdict
+            if verdict == "confirmed":
+                reason = confirmed_reasons.get(f.rule_id, "")
+            elif verdict in ("dismissed", "safety-net"):
+                reason = dismissed_reasons.get(f.rule_id, "")
+            else:
+                reason = ""
+            # Default reasons when agent didn't provide one
             if not reason:
                 if verdict == "noise":
                     reason = "not analyzed by agent"
@@ -965,7 +974,7 @@ class DecisionEngine:
             )
 
         print(f"\n  Gate: {findings_count} finding(s) "
-              f"({n_agent} from {n_vuln} confirmed rules"
+              f"({n_agent} across {n_vuln} vulnerabilities"
               f" + {n_safety} safety-net)")
         print(f"  Mode: {ctx.mode}")
 

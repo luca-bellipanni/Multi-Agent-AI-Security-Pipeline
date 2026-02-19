@@ -12,7 +12,11 @@ from src.models import (
 )
 from src.pr_reporter import (
     COMMENT_MARKER,
+    _compute_finding_id,
     _format_tools_used,
+    _resolve_duplicate_refs,
+    _short_path,
+    _short_rule,
     format_comment,
     post_comment,
 )
@@ -67,6 +71,64 @@ def _make_decision(**overrides):
     return Decision(**defaults)
 
 
+# --- _short_rule / _short_path ---
+
+class TestShortHelpers:
+
+    def test_short_rule_dotted(self):
+        assert _short_rule("python.flask.sql-injection") == "sql-injection"
+
+    def test_short_rule_simple(self):
+        assert _short_rule("sql-injection") == "sql-injection"
+
+    def test_short_path_github_workspace(self):
+        assert _short_path("/github/workspace/app.py") == "app.py"
+
+    def test_short_path_tmp_workspace(self):
+        assert _short_path("/tmp/workspace/src/db.py") == "src/db.py"
+
+    def test_short_path_no_prefix(self):
+        assert _short_path("src/db.py") == "src/db.py"
+
+
+# --- _compute_finding_id ---
+
+class TestComputeFindingId:
+
+    def test_matches_model(self):
+        """Finding ID matches models.Finding.finding_id."""
+        from src.models import Finding, Severity
+        f = Finding(tool="semgrep", rule_id="r1", path="a.py",
+                    line=10, severity=Severity.HIGH, message="m")
+        assert _compute_finding_id("r1", "a.py", 10) == f.finding_id
+
+
+# --- _resolve_duplicate_refs ---
+
+class TestResolveDuplicateRefs:
+
+    def test_resolves_rule_at_line(self):
+        lookup = {("python.flask.tainted-sql-string", 16): "F63b1ad",
+                  ("tainted-sql-string", 16): "F63b1ad"}
+        reason = (
+            "duplicate: same issue covered by rule "
+            "python.flask.tainted-sql-string at line 16"
+        )
+        result = _resolve_duplicate_refs(reason, lookup)
+        assert "see F63b1ad" in result
+        assert "python.flask" not in result
+
+    def test_no_match_keeps_original(self):
+        reason = "duplicate: same issue covered by rule unknown.rule at line 99"
+        result = _resolve_duplicate_refs(reason, {})
+        assert result == reason
+
+    def test_no_reference_passes_through(self):
+        reason = "not_exploitable: safe in this context"
+        result = _resolve_duplicate_refs(reason, {})
+        assert result == reason
+
+
 # --- format_comment ---
 
 class TestFormatComment:
@@ -96,24 +158,60 @@ class TestFormatComment:
         assert "`fetch_pr_files` x1" in body
         assert "`run_semgrep` x2" in body
 
-    def test_findings_table(self):
+    def test_findings_table_short_rule(self):
+        """Findings table uses short rule IDs."""
         d = _make_decision()
         body = format_comment(d)
         assert "### Findings (1)" in body
         assert "Fabc123" in body
         assert "HIGH" in body
-        assert "`python.sql-injection`" in body
+        # Short rule (not full path)
+        assert "`sql-injection`" in body
         assert "`src/db.py`" in body
         assert "42" in body
         assert "Source" in body
         assert "agent" in body
 
-    def test_confirmed_details_collapsible(self):
+    def test_findings_table_strips_workspace(self):
+        """Workspace prefix stripped from paths."""
+        d = _make_decision(confirmed_findings=[{
+            "finding_id": "Fxyz",
+            "rule_id": "r1",
+            "path": "/github/workspace/app.py",
+            "line": 10,
+            "severity": "high",
+            "message": "test",
+            "agent_reason": "",
+            "agent_recommendation": "",
+        }])
+        body = format_comment(d)
+        assert "`app.py`" in body
+        assert "/github/workspace" not in body
+
+    def test_details_has_finding_id(self):
+        """Details section includes finding IDs for cross-reference."""
         d = _make_decision()
         body = format_comment(d)
         assert "<details><summary>Details</summary>" in body
+        assert "**Fabc123**" in body
         assert "User input in query" in body
         assert "Use parameterized queries" in body
+
+    def test_details_short_rule_and_path(self):
+        """Details uses short rule and path."""
+        d = _make_decision(confirmed_findings=[{
+            "finding_id": "Fxyz",
+            "rule_id": "python.flask.tainted-sql-string",
+            "path": "/github/workspace/sample_app.py",
+            "line": 16,
+            "severity": "high",
+            "message": "test",
+            "agent_reason": "SQL injection",
+            "agent_recommendation": "Fix it",
+        }])
+        body = format_comment(d)
+        assert "`tainted-sql-string`" in body
+        assert "`sample_app.py:16`" in body
 
     def test_safety_net_note_shown(self):
         """Safety-net note shown when findings have source=safety-net."""
@@ -158,28 +256,75 @@ class TestFormatComment:
     def test_excepted_findings_collapsible(self):
         d = _make_decision(excepted_findings=[{
             "severity": "low",
-            "rule_id": "noise.rule",
-            "path": "test.py",
+            "rule_id": "python.noise.rule",
+            "path": "/github/workspace/test.py",
             "line": 5,
             "exception_reason": "auto-excepted from PR #40",
         }])
         body = format_comment(d)
         assert "Auto-excepted by memory (1)" in body
-        assert "`noise.rule`" in body
+        # Short rule
+        assert "`rule`" in body
+        # Stripped path
+        assert "`test.py" in body
 
     def test_no_excepted_no_section(self):
         d = _make_decision(excepted_findings=[])
         body = format_comment(d)
         assert "Auto-excepted" not in body
 
-    def test_dismissed_findings_collapsible(self):
+    def test_dismissed_with_finding_ids(self):
+        """Dismissed findings show finding IDs and short rule names."""
         d = _make_decision(dismissed_findings=[
-            {"rule_id": "test.rule", "reason": "test file"},
-            {"rule_id": "noise.rule", "reason": "false positive"},
+            {"rule_id": "python.test.rule", "path": "a.py",
+             "line": 10, "reason": "test file"},
+            {"rule_id": "python.noise.rule", "path": "b.py",
+             "line": 20, "reason": "false positive"},
         ])
         body = format_comment(d)
         assert "Dismissed by agent (2)" in body
-        assert "`test.rule`" in body
+        # Short rule names
+        assert "`rule`" in body
+        # Finding IDs computed
+        fid1 = _compute_finding_id("python.test.rule", "a.py", 10)
+        fid2 = _compute_finding_id("python.noise.rule", "b.py", 20)
+        assert fid1 in body
+        assert fid2 in body
+
+    def test_dismissed_resolves_duplicate_refs(self):
+        """Duplicate references in dismissed reasons resolve to finding IDs."""
+        d = _make_decision(
+            confirmed_findings=[{
+                "finding_id": "F63b1ad",
+                "rule_id": "python.flask.tainted-sql-string",
+                "path": "app.py",
+                "line": 16,
+                "severity": "high",
+                "message": "SQL injection",
+                "agent_reason": "Real issue",
+                "agent_recommendation": "Fix",
+            }],
+            dismissed_findings=[{
+                "rule_id": "python.other.rule",
+                "path": "app.py",
+                "line": 12,
+                "reason": (
+                    "duplicate: same issue covered by rule "
+                    "python.flask.tainted-sql-string at line 16"
+                ),
+            }],
+        )
+        body = format_comment(d)
+        assert "see F63b1ad" in body
+
+    def test_dismissed_no_path_fallback(self):
+        """Dismissed without path/line shows just rule and reason."""
+        d = _make_decision(dismissed_findings=[
+            {"rule_id": "test.rule", "reason": "test file"},
+        ])
+        body = format_comment(d)
+        assert "Dismissed by agent (1)" in body
+        assert "`rule`" in body
 
     def test_no_dismissed_no_section(self):
         d = _make_decision(dismissed_findings=[])

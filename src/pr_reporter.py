@@ -9,12 +9,63 @@ GitHub sanitizes HTML in comments. Structured data (rule_id, path, line)
 comes from the gate (gate-validated), not from agent output directly.
 """
 
+import hashlib
+import re
+
 import requests
 
 from src.models import Decision
 
 # HTML marker for upsert: find existing comment to update
 COMMENT_MARKER = "<!-- appsec-bot-report -->"
+
+
+def _short_rule(rule_id: str) -> str:
+    """Extract short rule name from full Semgrep rule ID."""
+    return rule_id.rsplit(".", 1)[-1] if "." in rule_id else rule_id
+
+
+def _short_path(path: str) -> str:
+    """Strip CI workspace prefix for cleaner display."""
+    for prefix in ("/github/workspace/", "/tmp/workspace/"):
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    return path
+
+
+def _compute_finding_id(rule_id: str, path: str, line: int) -> str:
+    """Compute deterministic finding ID (same as models.Finding)."""
+    key = f"{rule_id}::{path}::{line}"
+    return "F" + hashlib.sha256(key.encode()).hexdigest()[:6]
+
+
+def _resolve_duplicate_refs(
+    reason: str, id_lookup: dict[tuple[str, int], str],
+) -> str:
+    """Replace rule_id+line refs in reason with finding IDs.
+
+    Example: "duplicate: same issue covered by rule python.x.y at line 16"
+    → "duplicate: see F63b1ad"
+    """
+    # Match "rule <rule_id> at line <N>" or "rule <rule_id> at <path>:<N>"
+    def _replacer(m: re.Match) -> str:
+        ref_rule = m.group(1)
+        ref_line = int(m.group(2))
+        # Try full rule_id
+        fid = id_lookup.get((ref_rule, ref_line))
+        if not fid:
+            # Try short rule name
+            short = _short_rule(ref_rule)
+            fid = id_lookup.get((short, ref_line))
+        if fid:
+            return f"see {fid}"
+        return m.group(0)
+
+    return re.sub(
+        r'(?:same issue covered by |see )?rule\s+(\S+)\s+at\s+'
+        r'(?:line\s+)?(?:\S+:)?(\d+)',
+        _replacer, reason,
+    )
 
 
 def format_comment(decision: Decision) -> str:
@@ -48,6 +99,17 @@ def format_comment(decision: Decision) -> str:
             )
         lines.append("")
 
+    # Build finding ID lookup for cross-references
+    # Maps (rule_id, line) and (short_rule, line) → finding_id
+    _id_lookup: dict[tuple[str, int], str] = {}
+    for f in decision.confirmed_findings:
+        fid = f.get("finding_id", "")
+        rule = f.get("rule_id", "")
+        line = f.get("line", 0)
+        if fid and rule:
+            _id_lookup[(rule, line)] = fid
+            _id_lookup[(_short_rule(rule), line)] = fid
+
     # Findings table (confirmed + safety-net, unified)
     if decision.confirmed_findings:
         lines.append(
@@ -59,8 +121,8 @@ def format_comment(decision: Decision) -> str:
         for f in decision.confirmed_findings:
             fid = f.get("finding_id", "?")
             sev = f.get("severity", "?").upper()
-            rule = f"`{f.get('rule_id', '?')}`"
-            path = f"`{f.get('path', '?')}`"
+            rule = f"`{_short_rule(f.get('rule_id', '?'))}`"
+            path = f"`{_short_path(f.get('path', '?'))}`"
             line = f.get("line", "?")
             source = f.get("source", "confirmed")
             src_label = ("agent" if source == "confirmed"
@@ -71,15 +133,18 @@ def format_comment(decision: Decision) -> str:
             )
         lines.append("")
 
-        # Details (collapsible)
+        # Details (collapsible) — with finding ID
         lines.append("<details><summary>Details</summary>")
         lines.append("")
         for f in decision.confirmed_findings:
+            fid = f.get("finding_id", "?")
             sev = f.get("severity", "?").upper()
-            rule = f.get("rule_id", "?")
-            path = f.get("path", "?")
+            rule = _short_rule(f.get("rule_id", "?"))
+            path = _short_path(f.get("path", "?"))
             line = f.get("line", "?")
-            lines.append(f"**[{sev}] {rule}** at `{path}:{line}`")
+            lines.append(
+                f"**{fid}** [{sev}] `{rule}` at `{path}:{line}`"
+            )
             reason = f.get("agent_reason", "")
             source = f.get("source", "confirmed")
             if not reason and source == "safety-net":
@@ -117,16 +182,18 @@ def format_comment(decision: Decision) -> str:
         lines.append("")
         for e in decision.excepted_findings:
             sev = e.get("severity", "?")
-            rule = e.get("rule_id", "?")
-            path = e.get("path", "?")
+            rule = _short_rule(e.get("rule_id", "?"))
+            path = _short_path(e.get("path", "?"))
             line = e.get("line", "?")
             reason = e.get("exception_reason", "")
-            lines.append(f"- [{sev}] `{rule}` at `{path}:{line}` — {reason}")
+            lines.append(
+                f"- [{sev}] `{rule}` at `{path}:{line}` — {reason}"
+            )
         lines.append("")
         lines.append("</details>")
         lines.append("")
 
-    # Dismissed findings (collapsible)
+    # Dismissed findings (collapsible) — with finding IDs
     if decision.dismissed_findings:
         n = len(decision.dismissed_findings)
         lines.append(
@@ -134,9 +201,19 @@ def format_comment(decision: Decision) -> str:
         )
         lines.append("")
         for d in decision.dismissed_findings:
-            rule = d.get("rule_id", "?")
+            rule_id = d.get("rule_id", "?")
+            short = _short_rule(rule_id)
+            path = d.get("path", "")
+            line_num = d.get("line", 0)
             reason = d.get("reason", "no reason")
-            lines.append(f"- `{rule}` — {reason}")
+            # Compute finding ID for cross-reference
+            if path and line_num:
+                fid = _compute_finding_id(rule_id, path, line_num)
+                # Resolve duplicate references to finding IDs
+                resolved = _resolve_duplicate_refs(reason, _id_lookup)
+                lines.append(f"- {fid} `{short}` — {resolved}")
+            else:
+                lines.append(f"- `{short}` — {reason}")
         lines.append("")
         lines.append("</details>")
         lines.append("")

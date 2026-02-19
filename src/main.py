@@ -34,13 +34,6 @@ def _run_scan(ctx: GitHubContext) -> int:
     engine = DecisionEngine()
     decision = engine.decide(ctx)
 
-    print("::group::Results")
-    print(f"Decision: {decision.verdict.value}")
-    print(f"Findings: {decision.findings_count}")
-    if decision.safety_warnings:
-        print(f"Safety warnings: {len(decision.safety_warnings)}")
-    print("::endgroup::")
-
     # Save exception memory (auto-exceptions for next run)
     try:
         engine.save_memory()

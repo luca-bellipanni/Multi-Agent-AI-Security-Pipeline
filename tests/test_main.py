@@ -316,9 +316,6 @@ class TestResultsNoBloat:
         out = capsys.readouterr().out
         assert "Detailed Analysis" not in out
         assert "Lots of text here" not in out
-        # But Decision/Findings/Reason should still be there
-        assert "Decision: allowed" in out
-        assert "Findings: 0" in out
 
 
 # --- B6: PR link printed ---

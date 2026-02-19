@@ -1632,12 +1632,14 @@ class TestAnalyzerDiagnosticsPrint:
             assert "Analysis: 5 analyzed" in out
             assert "2 vulnerabilities confirmed," in out
             assert "1 dismissed" in out
-            # Agent reasoning (short rule, no severity labels)
+            # Agent reasoning (short rule, with severity)
             assert "Confirmed:" in out
-            assert "- r1: SQL injection found" in out
-            assert "- r2: Path traversal" in out
+            assert "[HIGH] r1: SQL injection found" in out
+            assert "[MEDIUM] r2: Path traversal" in out
             assert "Dismissed:" in out
-            assert "- r3: false positive" in out
+            assert "r3: false positive" in out
+            # Tool stats printed BEFORE analysis
+            assert out.index("Semgrep:") < out.index("Analysis:")
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -1684,9 +1686,9 @@ class TestAnalyzerDiagnosticsPrint:
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
             assert "Confirmed:" in out
-            assert "- sql-injection: User input in SQL query" in out
+            assert "[HIGH] sql-injection: User input in SQL query" in out
             assert "Dismissed:" in out
-            assert "- noise-rule:" in out
+            assert "noise-rule:" in out
             # Long reason truncated at word boundary
             assert "..." in out
 
@@ -1731,7 +1733,7 @@ class TestAnalyzerDiagnosticsPrint:
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
             assert "Confirmed:" in out
-            assert "- xss: Reflected XSS" in out
+            assert "[MEDIUM] xss: Reflected XSS" in out
             assert "Dismissed:" not in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
@@ -2182,7 +2184,7 @@ class TestSmartGateSummaryPrint:
         self._gate(raw, analysis, mode="enforce")
         out = capsys.readouterr().out
         assert "Gate: 2 finding(s)" in out
-        assert "1 from 1 confirmed rules + 1 safety-net" in out
+        assert "1 across 1 vulnerabilities + 1 safety-net" in out
 
     def test_findings_table_printed(self, capsys):
         """Findings table printed with all raw findings and verdicts."""
@@ -2378,4 +2380,4 @@ class TestSmartGateSummaryPrint:
         self._gate(raw, analysis, mode="shadow")
         out = capsys.readouterr().out
         assert "Gate: 1 finding(s)" in out
-        assert "1 from 1 confirmed rules + 0 safety-net" in out
+        assert "1 across 1 vulnerabilities + 0 safety-net" in out
