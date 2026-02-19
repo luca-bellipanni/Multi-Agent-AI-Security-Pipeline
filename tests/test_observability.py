@@ -28,7 +28,8 @@ class TestMakeStepLogger:
         mock_agent = Mock(max_steps=3)
         callback(mock_step, agent=mock_agent)
         output = capsys.readouterr().out
-        assert "[Test] Step 1/3" in output
+        assert "Step 1/3" in output
+        assert "✓" in output
         assert "2.5s" in output
         assert "run_semgrep" in output
 
@@ -65,7 +66,7 @@ class TestMakeStepLogger:
         callback = make_step_logger("Test")
         callback(object(), agent=None)
         output = capsys.readouterr().out
-        assert "[Test]" in output
+        assert "├─ Step" in output
 
     def test_no_agent_kwarg_no_crash(self, capsys):
         """Works when agent kwarg is missing."""
@@ -78,7 +79,7 @@ class TestMakeStepLogger:
         )
         callback(mock_step)
         output = capsys.readouterr().out
-        assert "[Test] Step 1/?" in output
+        assert "Step 1/?" in output
 
     def test_token_display_format(self, capsys):
         """Token count shown as 'Xk tok'."""
@@ -104,18 +105,19 @@ class TestMakeStepLogger:
         callback(mock_step, agent=Mock(max_steps=10))
         assert "(reasoning)" in capsys.readouterr().out
 
-    def test_multiple_tool_calls(self, capsys):
-        """Multiple tool calls shown comma-separated."""
+    def test_non_python_interpreter_tool_shown(self, capsys):
+        """Non-python_interpreter tool names shown directly."""
         callback = make_step_logger("Test")
         mock_step = Mock(
             step_number=1,
             timing=Mock(duration=1.0),
-            tool_calls=[_tc("fetch_pr_diff"), _tc("run_semgrep")],
+            model_output=None,
+            tool_calls=[_tc("fetch_pr_diff")],
             token_usage=None,
         )
         callback(mock_step, agent=Mock(max_steps=3))
         output = capsys.readouterr().out
-        assert "fetch_pr_diff, run_semgrep" in output
+        assert "fetch_pr_diff" in output
 
     def test_zero_tokens_no_display(self, capsys):
         """When token count is 0, no 'tok' shown."""
@@ -143,14 +145,14 @@ class TestMakeStepLogger:
         assert "limit: 0s" in output
         assert "[MyAgent]" in output
 
-    def test_agent_name_in_output(self, capsys):
-        """Agent name label appears in output."""
-        callback = make_step_logger("Triage")
+    def test_agent_name_in_timeout(self, capsys):
+        """Agent name label appears in timeout message."""
+        callback = make_step_logger("Triage", max_seconds=0)
         mock_step = Mock(
             step_number=1, timing=None,
             tool_calls=None, token_usage=None,
         )
-        callback(mock_step, agent=Mock(max_steps=3))
+        callback(mock_step, agent=Mock(max_steps=3, interrupt_switch=False))
         assert "[Triage]" in capsys.readouterr().out
 
     def test_timing_none_shows_zero(self, capsys):
@@ -164,6 +166,114 @@ class TestMakeStepLogger:
         )
         callback(mock_step, agent=Mock(max_steps=3))
         assert "0.0s" in capsys.readouterr().out
+
+
+# ── _extract_step_description ────────────────────────────────────────
+
+
+class TestExtractStepDescription:
+
+    def test_thought_from_model_output(self):
+        """Extracts 'Thought:' line from model_output."""
+        from src.observability import _extract_step_description
+        step = SimpleNamespace(
+            model_output="Thought: I need to scan the codebase\nCode:\nresult = run_semgrep('p/python')",
+            tool_calls=None,
+        )
+        assert _extract_step_description(step) == "I need to scan the codebase"
+
+    def test_long_thought_truncated_at_word_boundary(self):
+        """Long thoughts without period truncated at word boundary ≤120 chars."""
+        from src.observability import _extract_step_description
+        # Words separated by spaces, total > 120 chars
+        long_thought = "I am analyzing " + "the security vulnerabilities " * 5
+        step = SimpleNamespace(
+            model_output=f"Thought: {long_thought}",
+            tool_calls=None,
+        )
+        result = _extract_step_description(step)
+        assert result.endswith("...")
+        assert len(result) <= 124  # 120 + "..."
+
+    def test_thought_first_sentence_extracted(self):
+        """Thought with period: only first sentence returned."""
+        from src.observability import _extract_step_description
+        step = SimpleNamespace(
+            model_output="Thought: I found SQL injection. Let me also check XSS.",
+            tool_calls=None,
+        )
+        assert _extract_step_description(step) == "I found SQL injection."
+
+    def test_thought_ending_with_colon_skipped(self):
+        """Intro-only thoughts (ending with ':') are skipped."""
+        from src.observability import _extract_step_description
+        step = SimpleNamespace(
+            model_output="Thought: Here's what I observed:\nCode:\nx = 1",
+            tool_calls=None,
+        )
+        # Colon-ending thought skipped → falls through to fallback
+        assert _extract_step_description(step) == "(reasoning)"
+
+    def test_tool_name_from_code_arguments(self):
+        """Falls back to tool name mapping from code arguments."""
+        from src.observability import _extract_step_description
+        tc = SimpleNamespace(
+            name="python_interpreter",
+            arguments="result = run_semgrep('p/python')",
+        )
+        step = SimpleNamespace(model_output=None, tool_calls=[tc])
+        assert _extract_step_description(step) == "Running Semgrep scan"
+
+    def test_fetch_pr_diff_mapped(self):
+        """fetch_pr_diff mapped to description."""
+        from src.observability import _extract_step_description
+        tc = SimpleNamespace(
+            name="python_interpreter",
+            arguments="diff = fetch_pr_diff(pr_number=42)",
+        )
+        step = SimpleNamespace(model_output=None, tool_calls=[tc])
+        assert _extract_step_description(step) == "Fetching PR diff"
+
+    def test_non_python_interpreter_used_directly(self):
+        """Non-python_interpreter tool name used as-is."""
+        from src.observability import _extract_step_description
+        tc = SimpleNamespace(name="custom_tool", arguments=None)
+        step = SimpleNamespace(model_output=None, tool_calls=[tc])
+        assert _extract_step_description(step) == "custom_tool"
+
+    def test_fallback_reasoning(self):
+        """Falls back to (reasoning) when nothing available."""
+        from src.observability import _extract_step_description
+        step = SimpleNamespace(model_output=None, tool_calls=None)
+        assert _extract_step_description(step) == "(reasoning)"
+
+    def test_empty_thought_skipped(self):
+        """Empty 'Thought:' line skipped, falls through."""
+        from src.observability import _extract_step_description
+        step = SimpleNamespace(
+            model_output="Thought:  \nCode:\nx = 1",
+            tool_calls=None,
+        )
+        assert _extract_step_description(step) == "(reasoning)"
+
+    def test_model_output_not_string_ignored(self):
+        """Non-string model_output gracefully ignored."""
+        from src.observability import _extract_step_description
+        step = SimpleNamespace(model_output=12345, tool_calls=None)
+        assert _extract_step_description(step) == "(reasoning)"
+
+    def test_thought_priority_over_tool_mapping(self):
+        """Thought from model_output takes priority over code parsing."""
+        from src.observability import _extract_step_description
+        tc = SimpleNamespace(
+            name="python_interpreter",
+            arguments="result = run_semgrep('p/python')",
+        )
+        step = SimpleNamespace(
+            model_output="Thought: Let me analyze the vulnerabilities",
+            tool_calls=[tc],
+        )
+        assert _extract_step_description(step) == "Let me analyze the vulnerabilities"
 
 
 # ── run_with_timeout ─────────────────────────────────────────────────

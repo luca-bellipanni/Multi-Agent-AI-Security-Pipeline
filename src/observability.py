@@ -17,6 +17,63 @@ import time
 from typing import Any, Callable
 
 
+_TOOL_DESCRIPTIONS = {
+    "fetch_pr_files": "Fetching PR file list",
+    "fetch_pr_diff": "Fetching PR diff",
+    "run_semgrep": "Running Semgrep scan",
+    "read_code": "Reading source code",
+    "apply_fix": "Applying code fix",
+    "final_answer": "Producing final analysis",
+}
+
+
+def _extract_step_description(step) -> str:
+    """Extract a human-readable description from a smolagents step.
+
+    Priority:
+    1. step.model_output → parse "Thought:" line, first sentence ≤120 chars
+    2. Parse code in tool_calls arguments for known tool names
+    3. Fallback: "(reasoning)"
+    """
+    # 1. Try model_output (LLM's own words)
+    model_output = getattr(step, "model_output", None)
+    if model_output and isinstance(model_output, str):
+        for line in model_output.split("\n"):
+            stripped = line.strip()
+            if stripped.lower().startswith("thought:"):
+                thought = stripped[len("thought:"):].strip()
+                if not thought or thought.endswith(":"):
+                    continue  # skip empty or intro-only thoughts
+                # Take first sentence (up to period)
+                dot_idx = thought.find(".")
+                if 0 < dot_idx < 120:
+                    return thought[:dot_idx + 1]
+                # No period — truncate at word boundary
+                if len(thought) > 120:
+                    cut = thought[:120].rfind(" ")
+                    if cut > 40:
+                        return thought[:cut] + "..."
+                    return thought[:120] + "..."
+                return thought
+
+    # 2. Parse code for known tool function calls
+    tool_calls = getattr(step, "tool_calls", None)
+    if tool_calls:
+        for tc in tool_calls:
+            args = getattr(tc, "arguments", None)
+            if isinstance(args, str):
+                for tool_name, desc in _TOOL_DESCRIPTIONS.items():
+                    if tool_name + "(" in args:
+                        return desc
+            # If not python_interpreter, use tool name directly
+            name = getattr(tc, "name", "")
+            if name and name != "python_interpreter":
+                return name
+
+    # 3. Fallback
+    return "(reasoning)"
+
+
 def make_step_logger(
     agent_name: str,
     max_seconds: float | None = None,
@@ -32,9 +89,9 @@ def make_step_logger(
 
     CI output example::
 
-        [Triage] Step 1/3 (4.2s) — fetch_pr_files | 1.8k tok
-        [Triage] Step 2/3 (2.1s) — (reasoning) | 0.9k tok
-        [Triage] TIMEOUT after 125s (limit: 120s)
+        [Triage] Step 1/3 (1.8s) — I need to fetch the PR files... | 3.0k tok
+        [AppSec] Step 2/10 (13.0s) — Running Semgrep scan | 11.9k tok
+        [AppSec] TIMEOUT after 605s (limit: 600s)
     """
     start_time = time.monotonic()
 
@@ -52,12 +109,8 @@ def make_step_logger(
         if timing:
             duration = getattr(timing, "duration", 0.0) or 0.0
 
-        # Tool calls
-        tool_calls = getattr(step, "tool_calls", None)
-        if tool_calls:
-            tools_str = ", ".join(tc.name for tc in tool_calls)
-        else:
-            tools_str = "(reasoning)"
+        # Step description (natural language from LLM or tool mapping)
+        tools_str = _extract_step_description(step)
 
         # Token usage
         tok_str = ""
@@ -68,14 +121,14 @@ def make_step_logger(
             if total > 0:
                 tok_str = f" | {total / 1000:.1f}k tok"
 
-        print(f"  [{agent_name}] Step {step_num}/{max_steps} "
-              f"({duration:.1f}s) — {tools_str}{tok_str}")
+        print(f"  ├─ Step {step_num}/{max_steps}  ✓  "
+              f"{tools_str:<50s}{duration:>6.1f}s{tok_str}")
 
         # Timeout check
         if max_seconds is not None and elapsed > max_seconds:
             if agent:
                 agent.interrupt_switch = True
-            print(f"  [{agent_name}] TIMEOUT after {elapsed:.0f}s "
+            print(f"  └─ [{agent_name}] TIMEOUT after {elapsed:.0f}s "
                   f"(limit: {max_seconds:.0f}s)")
 
     return callback
@@ -132,7 +185,7 @@ def run_with_timeout(
         if thread.is_alive():
             elapsed = time.monotonic() - start
             if elapsed < max_seconds:
-                print(f"  [{agent_name}] Still running... ({elapsed:.0f}s)")
+                print(f"  │  [{agent_name}] Still running... ({elapsed:.0f}s)")
 
     if thread.is_alive():
         # Hard timeout — try graceful shutdown
@@ -140,7 +193,7 @@ def run_with_timeout(
             agent.interrupt_switch = True
         elapsed = time.monotonic() - start
         print(
-            f"  [{agent_name}] HARD TIMEOUT — "
+            f"  └─ [{agent_name}] HARD TIMEOUT — "
             f"{elapsed:.0f}s elapsed (limit: {max_seconds:.0f}s)"
         )
         # Grace period: let the agent finish current step

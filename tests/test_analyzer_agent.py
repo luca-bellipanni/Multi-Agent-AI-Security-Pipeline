@@ -326,8 +326,14 @@ class TestAnalyzerSystemPromptSecurity:
     def test_prompt_forbids_dismissing_via_comments(self):
         assert "NEVER dismiss" in ANALYZER_SYSTEM_PROMPT
 
-    def test_prompt_has_false_positive_criteria(self):
-        assert "FALSE POSITIVE CRITERIA" in ANALYZER_SYSTEM_PROMPT
+    def test_prompt_has_dismissal_criteria(self):
+        assert "DISMISSAL CRITERIA" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_requires_all_findings_accounted(self):
+        """Agent must account for every finding (confirm or dismiss)."""
+        assert "EVERY finding" in ANALYZER_SYSTEM_PROMPT
+        assert "confirmed" in ANALYZER_SYSTEM_PROMPT
+        assert "dismissed" in ANALYZER_SYSTEM_PROMPT
 
     def test_prompt_mentions_test_files(self):
         assert "test file" in ANALYZER_SYSTEM_PROMPT.lower()
@@ -337,6 +343,26 @@ class TestAnalyzerSystemPromptSecurity:
 
     def test_prompt_mentions_security_audit(self):
         assert "p/security-audit" in ANALYZER_SYSTEM_PROMPT
+
+
+class TestAnalyzerPromptReasoningQuality:
+    """Verify prompt enforces specific reasoning quality."""
+
+    def test_prompt_bans_generic_phrases(self):
+        assert "BANNED" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_requires_data_flow(self):
+        assert "data flow" in ANALYZER_SYSTEM_PROMPT.lower()
+
+    def test_prompt_requires_attack_scenario(self):
+        assert "ATTACK SCENARIO" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_has_good_bad_examples(self):
+        assert "GOOD" in ANALYZER_SYSTEM_PROMPT
+        assert "BAD" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_requires_actionable_recommendation(self):
+        assert "ACTIONABLE" in ANALYZER_SYSTEM_PROMPT
 
 
 # ── OODA prompt checks ──────────────────────────────────────────────
@@ -498,3 +524,11 @@ class TestAnalyzerAgentObservability:
         create_analyzer_agent("key", "model-id")
         call_kwargs = mock_model.call_args.kwargs
         assert call_kwargs["timeout"] == 120
+
+    @patch("src.analyzer_agent.LiteLLMModel")
+    @patch("src.analyzer_agent.CodeAgent")
+    def test_llm_num_retries_set(self, mock_agent, mock_model):
+        """LiteLLMModel created with num_retries=1 to limit 429 backoff."""
+        create_analyzer_agent("key", "model-id")
+        call_kwargs = mock_model.call_args.kwargs
+        assert call_kwargs["num_retries"] == 1

@@ -34,14 +34,6 @@ def _run_scan(ctx: GitHubContext) -> int:
     engine = DecisionEngine()
     decision = engine.decide(ctx)
 
-    print("::group::Results")
-    print(f"Decision: {decision.verdict.value}")
-    print(f"Findings: {decision.findings_count}")
-    print(f"Reason: {decision.reason}")
-    if decision.safety_warnings:
-        print(f"\n*** {len(decision.safety_warnings)} SAFETY WARNING(S) ***")
-    print("::endgroup::")
-
     # Save exception memory (auto-exceptions for next run)
     try:
         engine.save_memory()
@@ -75,9 +67,6 @@ def _run_scan(ctx: GitHubContext) -> int:
                 post_comment(
                     ctx.token, ctx.repository, ctx.pr_number, body,
                 )
-                pr_url = (f"https://github.com/{ctx.repository}"
-                          f"/pull/{ctx.pr_number}")
-                print(pr_url)
             else:
                 print("No GitHub token, skipping PR comment")
         else:
@@ -87,11 +76,24 @@ def _run_scan(ctx: GitHubContext) -> int:
     finally:
         print("::endgroup::")
 
+    # Footer info
+    if decision.scan_results_path:
+        print(f"\n  📄 {decision.scan_results_path}")
+    if ctx.is_pull_request and ctx.pr_number and ctx.token:
+        pr_url = (f"https://github.com/{ctx.repository}"
+                  f"/pull/{ctx.pr_number}")
+        print(f"  🔗 {pr_url}")
+
     write_outputs(decision.to_outputs())
 
     if not decision.continue_pipeline:
-        print("::warning::Pipeline blocked by Agentic AppSec")
+        print("\n  Pipeline: stopped")
+        print()
+        print("━" * 60)
         return 1
+    print("\n  Pipeline: continue")
+    print()
+    print("━" * 60)
     return 0
 
 
@@ -136,8 +138,12 @@ def _run_remediation(ctx: GitHubContext) -> int:
 
 
 def main() -> int:
+    print()
+    print("━" * 60)
+    print("  🔒 MULTI-AGENT AI SECURITY PIPELINE")
+    print("━" * 60)
+    print()
     print("::group::Pipeline Info")
-    print("=== Agentic AppSec Pipeline ===")
     ctx = GitHubContext.from_environment()
     command = os.environ.get("INPUT_COMMAND", "scan")
     print(f"Mode: {ctx.mode}")

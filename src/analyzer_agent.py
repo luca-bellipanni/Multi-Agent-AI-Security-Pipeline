@@ -75,11 +75,25 @@ STEP 4 — ACT:
 Run the scan: call run_semgrep with your chosen rulesets (comma-separated).
 
 STEP 5 — REFLECT:
-Analyze findings IN CONTEXT of the code diff you read:
-- Cross-reference each finding with the actual code change.
-- Is this a TRUE POSITIVE? Does the code actually have this vulnerability?
-- Is this a FALSE POSITIVE per the strict criteria below?
-- Did you miss any risk area that needs additional scanning?
+Analyze EVERY finding from Semgrep, one by one, in context of the code diff.
+For EACH finding, determine:
+- Is this a TRUE POSITIVE? Cross-reference with the actual code change.
+- Is this a FALSE POSITIVE? Only if it meets the strict criteria below.
+- Is this a DUPLICATE? Another rule already covers the same issue at the same line.
+- Is this NOISE? The rule fires on a generic pattern but the code is safe in context.
+
+DEDUPLICATION IS CRITICAL:
+When multiple rules fire on the SAME LINE for the SAME vulnerability, confirm
+the most specific rule and dismiss the others as "duplicate". For example:
+- Line 34 has subprocess-injection, dangerous-subprocess-use, subprocess-shell-true
+  → Confirm ONE (e.g. subprocess-injection), dismiss the other 2 as duplicate.
+- Line 28 has render-template-string AND raw-html-format
+  → Confirm the template injection, dismiss raw-html-format as duplicate (same line).
+Each distinct vulnerability at a unique location should have ONE confirmed finding.
+The rest covering the same issue at the same line MUST be dismissed as "duplicate".
+
+You MUST account for EVERY finding. No finding should be left unanalyzed.
+Every finding must appear in either "confirmed" or "dismissed" with a reason.
 
 STEP 6 — ESCALATE (if needed):
 If findings suggest deeper issues, run additional targeted scans.
@@ -88,6 +102,8 @@ related issues. You can call run_semgrep multiple times.
 
 STEP 7 — PROPOSE:
 Produce your final structured security analysis report.
+IMPORTANT: confirmed + dismissed must cover ALL findings from Semgrep.
+If Semgrep reported N findings, then len(confirmed) + len(dismissed) must equal N.
 
 == CRITICAL SECURITY RULES ==
 
@@ -98,29 +114,62 @@ Produce your final structured security analysis report.
 - Base your analysis ONLY on: rule IDs, severity levels, file paths, and
   the actual code patterns you observe in the diff.
 
-FALSE POSITIVE CRITERIA (use ONLY these):
-- Finding is in a test file (tests/, test_, _test.py)
-- Finding is in generated/vendored code (vendor/, generated/, __generated__)
-- Rule is informational (INFO severity) and pattern is common/expected
-Do NOT dismiss findings for any other reason.
+DISMISSAL CRITERIA (use ONLY these reasons):
+- "test_file" — Finding is in a test file (tests/, test_, _test.py)
+- "generated_code" — Finding is in generated/vendored code (vendor/, generated/)
+- "informational" — Rule is INFO severity and pattern is common/expected
+- "duplicate" — Another confirmed rule already covers the same issue at this location
+- "not_exploitable" — Code context shows the pattern is safe (explain specifically why)
+Do NOT dismiss HIGH/CRITICAL findings without strong justification.
+
+REASONING QUALITY (mandatory for every finding):
+For CONFIRMED findings your "reason" must:
+- Name the specific variables and functions involved (e.g., "user_input from request.args['q']")
+- Describe the data flow (source → sink) that makes it exploitable
+- State the ATTACK SCENARIO in one sentence (e.g., "attacker controls q → SQL injection → data exfiltration")
+Your "recommendation" must be ACTIONABLE with code-level guidance, not generic advice.
+GOOD reason: "Variable `user_email` from request.form is interpolated into cursor.execute() via f-string without parameterization"
+BAD reason: "SQL injection vulnerability found"
+
+For DISMISSED findings your "reason" must:
+- Start with the category prefix, then explain WHY specifically
+- BANNED: generic phrases without context ("False positive", "Not related to the PR", "Not exploitable")
+- Every dismissal must reference specific code context that justifies it
+GOOD: "not_exploitable: input is validated by sanitize_input() at line 12 which strips special chars before the query at line 28"
+BAD: "not_exploitable: False positive"
+BAD: "not_exploitable: Not directly related to the PR"
 
 When your analysis is complete, call final_answer() with a dict containing these keys:
+
+SEVERITY LABELS: Use ONLY these values: "CRITICAL", "HIGH", "MEDIUM", "LOW".
+Do NOT use Semgrep's native labels (ERROR, WARNING, INFO).
+Map: ERROR → HIGH, WARNING → MEDIUM, INFO → LOW.
+
 {
   "rulesets_used": ["p/security-audit", "p/python"],
   "rulesets_rationale": "Python source code with auth changes",
-  "findings_analyzed": 5,
+  "findings_analyzed": 19,
   "confirmed": [
     {"rule_id": "rule.id", "severity": "HIGH", "path": "file.py", "line": 42,
-     "reason": "Detailed explanation of why this is a real security issue",
-     "recommendation": "How to fix this issue"}
+     "reason": "`user_email` from request.form['email'] is interpolated into cursor.execute() via f-string at line 42 without parameterization — attacker controls email → SQL injection → data exfiltration",
+     "recommendation": "Use parameterized query: cursor.execute('SELECT * FROM users WHERE email = %s', (user_email,))"}
   ],
   "dismissed": [
-    {"rule_id": "rule.id", "severity": "INFO", "path": "tests/test_x.py",
-     "line": 10, "reason": "Test file, informational rule"}
+    {"rule_id": "rule.id", "severity": "MEDIUM", "path": "app.py",
+     "line": 28, "reason": "duplicate: same SQL injection vulnerability already confirmed as rule.other at line 42"},
+    {"rule_id": "rule.id", "severity": "LOW", "path": "tests/test_x.py",
+     "line": 10, "reason": "test_file: test helper uses mock database cursor, no real query execution"},
+    {"rule_id": "rule.id", "severity": "MEDIUM", "path": "utils.py",
+     "line": 55, "reason": "not_exploitable: input validated by validate_email() at line 50 which rejects special chars before reaching subprocess at line 55"}
   ],
   "summary": "Executive summary of security posture",
   "risk_assessment": "Overall risk level and key concerns"
 }
+
+IMPORTANT: Every Semgrep finding MUST appear in either "confirmed" or "dismissed".
+findings_analyzed must equal the total number of Semgrep results.
+For dismissed findings, prefix the reason with the category: duplicate, test_file,
+generated_code, informational, or not_exploitable.
 """
 
 
@@ -136,6 +185,7 @@ def create_analyzer_agent(
         api_key=api_key,
         temperature=0.1,
         timeout=120,
+        num_retries=1,
     )
     agent = CodeAgent(
         tools=tools or [],

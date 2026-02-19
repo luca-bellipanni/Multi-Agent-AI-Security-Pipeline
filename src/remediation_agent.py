@@ -81,6 +81,7 @@ def create_remediation_agent(
         api_key=api_key,
         temperature=0.1,
         timeout=120,
+        num_retries=1,
     )
     agent = CodeAgent(
         tools=tools,

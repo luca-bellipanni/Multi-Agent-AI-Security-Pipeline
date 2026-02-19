@@ -10,6 +10,7 @@ and recommends which specialist AGENT(s) to invoke. It does NOT decide
 specific tool rulesets — that is the specialist's job.
 """
 
+import ast
 import json
 
 from smolagents import CodeAgent, LiteLLMModel
@@ -89,6 +90,7 @@ def create_triage_agent(
         api_key=api_key,
         temperature=0.1,
         timeout=30,
+        num_retries=1,
     )
     agent = CodeAgent(
         tools=tools or [],
@@ -160,10 +162,17 @@ def parse_triage_response(response) -> dict:
         end = text.rfind("}") + 1
         if start == -1 or end == 0:
             return default
+        fragment = text[start:end]
         try:
-            data = json.loads(text[start:end])
+            data = json.loads(fragment)
         except json.JSONDecodeError:
-            return default
+            # Fallback: Python dict syntax (single quotes, True/False)
+            try:
+                data = ast.literal_eval(fragment)
+                if not isinstance(data, dict):
+                    return default
+            except (ValueError, SyntaxError):
+                return default
     else:
         return default
 

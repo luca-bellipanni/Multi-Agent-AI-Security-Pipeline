@@ -33,6 +33,7 @@ class Finding:
     line: int
     severity: Severity
     message: str
+    fix: str = ""
 
     @property
     def finding_id(self) -> str:
