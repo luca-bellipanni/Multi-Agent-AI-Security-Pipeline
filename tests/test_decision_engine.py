@@ -1592,8 +1592,10 @@ class TestAnalyzerDiagnosticsPrint:
         """Prints agent analysis breakdown (confirmed/dismissed counts)."""
         mock_run.return_value = {
             "confirmed": [
-                {"rule_id": "r1", "severity": "HIGH"},
-                {"rule_id": "r2", "severity": "MEDIUM"},
+                {"rule_id": "r1", "severity": "HIGH",
+                 "reason": "SQL injection found"},
+                {"rule_id": "r2", "severity": "MEDIUM",
+                 "reason": "Path traversal"},
             ],
             "dismissed": [
                 {"rule_id": "r3", "reason": "false positive"},
@@ -1628,7 +1630,111 @@ class TestAnalyzerDiagnosticsPrint:
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
             assert "Analysis: 5 analyzed" in out
-            assert "2 confirmed, 1 dismissed" in out
+            assert "2 vulnerabilities confirmed," in out
+            assert "1 dismissed" in out
+            # Agent reasoning
+            assert "Confirmed:" in out
+            assert "[HIGH] r1" in out
+            assert "[MEDIUM] r2" in out
+            assert "Dismissed:" in out
+            assert "r3 -- false positive" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_agent_reasoning_with_reasons(self, mock_agent, mock_run, capsys):
+        """Prints agent reasoning with truncated reasons."""
+        long_reason = "A" * 200
+        mock_run.return_value = {
+            "confirmed": [
+                {"rule_id": "sql-injection", "severity": "high",
+                 "reason": "User input in SQL query"},
+            ],
+            "dismissed": [
+                {"rule_id": "noise-rule",
+                 "reason": long_reason},
+            ],
+            "summary": "Found issues",
+            "findings_analyzed": 3,
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        triage = _make_triage()
+        ctx = _make_context()
+
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/test/workspace"
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, triage)
+            out = capsys.readouterr().out
+            assert "Confirmed:" in out
+            assert "[HIGH] sql-injection" in out
+            assert "User input in SQL query" in out
+            assert "Dismissed:" in out
+            assert "noise-rule" in out
+            # Long reason truncated
+            assert "..." in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_agent_reasoning_no_dismissed(self, mock_agent, mock_run, capsys):
+        """No Dismissed section when agent dismisses nothing."""
+        mock_run.return_value = {
+            "confirmed": [
+                {"rule_id": "xss", "severity": "medium",
+                 "reason": "Reflected XSS"},
+            ],
+            "dismissed": [],
+            "summary": "Found XSS",
+            "findings_analyzed": 1,
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        triage = _make_triage()
+        ctx = _make_context()
+
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/test/workspace"
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, triage)
+            out = capsys.readouterr().out
+            assert "Confirmed:" in out
+            assert "[MEDIUM] xss" in out
+            assert "Reflected XSS" in out
+            assert "Dismissed:" not in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -2078,7 +2184,7 @@ class TestSmartGateSummaryPrint:
         self._gate(raw, analysis, mode="enforce")
         out = capsys.readouterr().out
         assert "Gate: 2 finding(s)" in out
-        assert "1 confirmed + 1 safety-net" in out
+        assert "1 from 1 confirmed rules + 1 safety-net" in out
 
     def test_findings_table_printed(self, capsys):
         """Findings table printed with all raw findings and verdicts."""
@@ -2251,4 +2357,4 @@ class TestSmartGateSummaryPrint:
         self._gate(raw, analysis, mode="shadow")
         out = capsys.readouterr().out
         assert "Gate: 1 finding(s)" in out
-        assert "1 confirmed + 0 safety-net" in out
+        assert "1 from 1 confirmed rules + 0 safety-net" in out

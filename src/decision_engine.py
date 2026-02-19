@@ -101,7 +101,8 @@ class DecisionEngine:
                 traces.append(StepTrace(
                     name="AppSec Agent (OODA)",
                     tools_used=analyzer_tools,
-                    summary=f"{raw_count} raw, agent confirmed {confirmed_count}",
+                    summary=(f"{raw_count} raw, "
+                            f"{confirmed_count} vulnerabilities confirmed"),
                     status="success",
                 ))
         except Exception:
@@ -283,7 +284,36 @@ class DecisionEngine:
             n_dismissed = len(analysis.get("dismissed", []))
             n_analyzed = analysis.get("findings_analyzed", 0)
             print(f"  Analysis: {n_analyzed} analyzed"
-                  f" → {n_confirmed} confirmed, {n_dismissed} dismissed")
+                  f" → {n_confirmed} vulnerabilities confirmed,"
+                  f" {n_dismissed} dismissed")
+
+            # Agent reasoning per finding
+            confirmed_list = analysis.get("confirmed", [])
+            if confirmed_list:
+                print("  Confirmed:")
+                for c in confirmed_list:
+                    if not isinstance(c, dict):
+                        continue
+                    rule = c.get("rule_id", "?")
+                    sev = c.get("severity", "?").upper()
+                    reason = c.get("reason", "")
+                    short = (reason[:120] + "..."
+                             if len(reason) > 120 else reason)
+                    print(f"    [{sev}] {rule}")
+                    if short:
+                        print(f"          {short}")
+
+            dismissed_list = analysis.get("dismissed", [])
+            if dismissed_list:
+                print("  Dismissed:")
+                for d in dismissed_list:
+                    if not isinstance(d, dict):
+                        continue
+                    rule = d.get("rule_id", "?")
+                    reason = d.get("reason", "no reason")
+                    short = (reason[:120] + "..."
+                             if len(reason) > 120 else reason)
+                    print(f"    {rule} -- {short}")
 
             # Essential diagnostics (always shown)
             print(f"  Semgrep: {semgrep_tool._call_count} scan(s), "
@@ -898,6 +928,10 @@ class DecisionEngine:
             if f.rule_id in confirmed_rule_ids_gate
         )
         n_safety = findings_count - n_agent
+        n_vuln = len({
+            f.rule_id for f in effective_findings
+            if f.rule_id in confirmed_rule_ids_gate
+        })
 
         # Anti-hallucination warning
         if confirmed_rule_ids_gate and n_agent == 0:
@@ -908,7 +942,8 @@ class DecisionEngine:
             )
 
         print(f"\n  Gate: {findings_count} finding(s) "
-              f"({n_agent} confirmed + {n_safety} safety-net)")
+              f"({n_agent} from {n_vuln} confirmed rules"
+              f" + {n_safety} safety-net)")
         print(f"  Mode: {ctx.mode}")
 
         excepted_count = len(excepted_info)
