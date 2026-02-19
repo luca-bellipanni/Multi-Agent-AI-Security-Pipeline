@@ -345,6 +345,26 @@ class TestAnalyzerSystemPromptSecurity:
         assert "p/security-audit" in ANALYZER_SYSTEM_PROMPT
 
 
+class TestAnalyzerPromptReasoningQuality:
+    """Verify prompt enforces specific reasoning quality."""
+
+    def test_prompt_bans_generic_phrases(self):
+        assert "BANNED" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_requires_data_flow(self):
+        assert "data flow" in ANALYZER_SYSTEM_PROMPT.lower()
+
+    def test_prompt_requires_attack_scenario(self):
+        assert "ATTACK SCENARIO" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_has_good_bad_examples(self):
+        assert "GOOD" in ANALYZER_SYSTEM_PROMPT
+        assert "BAD" in ANALYZER_SYSTEM_PROMPT
+
+    def test_prompt_requires_actionable_recommendation(self):
+        assert "ACTIONABLE" in ANALYZER_SYSTEM_PROMPT
+
+
 # ── OODA prompt checks ──────────────────────────────────────────────
 
 

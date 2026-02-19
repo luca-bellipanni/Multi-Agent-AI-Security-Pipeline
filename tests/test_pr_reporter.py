@@ -237,15 +237,31 @@ class TestFormatComment:
         body = format_comment(d)
         assert "Safety net" not in body
 
-    def test_safety_net_details_fallback_reason(self):
-        """Safety-net findings get default reason in collapsible details."""
+    def test_safety_net_details_uses_semgrep_message(self):
+        """Safety-net findings use Semgrep message as analysis."""
         d = _make_decision(confirmed_findings=[{
             "finding_id": "Fxyz",
             "rule_id": "missed.rule",
             "path": "app.py",
             "line": 10,
             "severity": "high",
-            "message": "missed",
+            "message": "SQL injection detected in query",
+            "agent_reason": "",
+            "agent_recommendation": "",
+            "source": "safety-net",
+        }])
+        body = format_comment(d)
+        assert "SQL injection detected in query" in body
+
+    def test_safety_net_empty_message_fallback(self):
+        """Safety-net findings with no Semgrep message use generic fallback."""
+        d = _make_decision(confirmed_findings=[{
+            "finding_id": "Fxyz",
+            "rule_id": "missed.rule",
+            "path": "app.py",
+            "line": 10,
+            "severity": "high",
+            "message": "",
             "agent_reason": "",
             "agent_recommendation": "",
             "source": "safety-net",

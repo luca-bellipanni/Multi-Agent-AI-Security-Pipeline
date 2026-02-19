@@ -1436,6 +1436,58 @@ class TestBuildConfirmedStructured:
         assert result[0]["source"] == "confirmed"
         assert result[1]["source"] == "safety-net"
 
+    def test_safety_net_uses_semgrep_message(self):
+        """Safety-net findings get f.message as agent_reason fallback."""
+        engine = DecisionEngine()
+        findings = [
+            _make_finding(Severity.HIGH, rule_id="missed.r",
+                          message="SQL query built with string concatenation"),
+        ]
+        analysis = {"confirmed": []}
+        warnings = [{"rule_id": "missed.r", "severity": "high"}]
+        result = engine._build_confirmed_structured(
+            findings, analysis, warnings,
+        )
+        assert result[0]["source"] == "safety-net"
+        assert result[0]["agent_reason"] == (
+            "SQL query built with string concatenation"
+        )
+        assert "Review this finding" in result[0]["agent_recommendation"]
+        assert "HIGH" in result[0]["agent_recommendation"]
+
+    def test_safety_net_empty_message_no_reason(self):
+        """Safety-net with empty message gets empty agent_reason."""
+        engine = DecisionEngine()
+        findings = [
+            _make_finding(Severity.HIGH, rule_id="missed.r", message=""),
+        ]
+        analysis = {"confirmed": []}
+        warnings = [{"rule_id": "missed.r", "severity": "high"}]
+        result = engine._build_confirmed_structured(
+            findings, analysis, warnings,
+        )
+        assert result[0]["agent_reason"] == ""
+        assert "Review this finding" in result[0]["agent_recommendation"]
+
+    def test_confirmed_reason_not_overwritten_by_message(self):
+        """Agent-confirmed findings keep their own reason, not f.message."""
+        engine = DecisionEngine()
+        findings = [
+            _make_finding(Severity.HIGH, rule_id="sqli",
+                          message="generic semgrep msg"),
+        ]
+        analysis = {
+            "confirmed": [{
+                "rule_id": "sqli",
+                "severity": "HIGH",
+                "reason": "specific agent analysis",
+                "recommendation": "use params",
+            }],
+        }
+        result = engine._build_confirmed_structured(findings, analysis)
+        assert result[0]["agent_reason"] == "specific agent analysis"
+        assert result[0]["agent_recommendation"] == "use params"
+
 
 # --- Structured findings on Decision ---
 
@@ -2381,13 +2433,45 @@ class TestSmartGateSummaryPrint:
         assert "dismissed" in out
         assert "Summary:" in out
 
-    def test_noise_shows_not_analyzed(self, capsys):
-        """Noise findings show 'not analyzed by agent' as reason."""
+    def test_noise_shows_semgrep_message(self, capsys):
+        """Noise findings show Semgrep message as fallback reason."""
         raw = [_make_finding(Severity.LOW, rule_id="noise.rule",
                              path="x.py", line=1)]
         self._gate(raw, _empty_analysis(), mode="shadow")
         out = capsys.readouterr().out
+        assert "not analyzed" in out
+        assert "Test finding" in out
+
+    def test_noise_empty_message_generic_fallback(self, capsys):
+        """Noise findings with empty message show generic text."""
+        raw = [_make_finding(Severity.LOW, rule_id="noise.rule",
+                             path="x.py", line=1, message="")]
+        self._gate(raw, _empty_analysis(), mode="shadow")
+        out = capsys.readouterr().out
         assert "not analyzed by agent" in out
+
+    def test_table_reason_not_truncated(self, capsys):
+        """Full reasons appear in the findings table (no 80-char cut)."""
+        long_reason = (
+            "SQL injection via f-string where user_email from request "
+            "flows into cursor.execute without parameterization, "
+            "enabling data exfiltration"
+        )
+        raw = [_make_finding(Severity.HIGH, rule_id="sqli.rule",
+                             path="app.py", line=10)]
+        analysis = {
+            "confirmed": [{"rule_id": "sqli.rule", "severity": "HIGH",
+                           "reason": long_reason}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+            "summary": "found",
+            "rulesets_used": [], "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        self._gate(raw, analysis, mode="shadow")
+        out = capsys.readouterr().out
+        # "parameterization" is past 80 chars — must appear untruncated
+        assert "parameterization" in out
 
     def test_dismissed_shows_agent_reason(self, capsys):
         """Dismissed findings show agent's dismissal reason in table."""
@@ -2457,8 +2541,8 @@ class TestSmartGateSummaryPrint:
         # Agent reason for confirmed still shows
         assert "SQL injection" in out
 
-    def test_safety_net_has_default_reason(self, capsys):
-        """Safety-net findings show default reason in table."""
+    def test_safety_net_shows_semgrep_message(self, capsys):
+        """Safety-net findings show Semgrep message as fallback reason."""
         raw = [_make_finding(Severity.HIGH, rule_id="missed.rule",
                              path="x.py", line=1)]
         analysis = {
@@ -2472,7 +2556,8 @@ class TestSmartGateSummaryPrint:
         }
         self._gate(raw, analysis, mode="enforce")
         out = capsys.readouterr().out
-        assert "HIGH/CRITICAL not confirmed by agent" in out
+        assert "safety-net" in out
+        assert "Test finding" in out
 
     def test_shadow_reason_has_severity_breakdown(self, capsys):
         """Shadow mode reason includes severity breakdown."""

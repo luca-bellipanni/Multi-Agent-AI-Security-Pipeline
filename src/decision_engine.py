@@ -544,20 +544,18 @@ class DecisionEngine:
         }
 
         # Separate reason dicts: confirmed vs dismissed (avoid overwrite)
-        # Shorten rule refs BEFORE truncation so the short name survives
+        # No truncation here — table REASON column has no width constraint
         confirmed_reasons: dict[str, str] = {}
         for c in agent_analysis.get("confirmed", []):
             if isinstance(c, dict) and c.get("rule_id"):
-                raw = _shorten_rule_refs(c.get("reason", ""))
-                confirmed_reasons[c["rule_id"]] = _truncate_reason(
-                    raw, 80,
+                confirmed_reasons[c["rule_id"]] = _shorten_rule_refs(
+                    c.get("reason", ""),
                 )
         dismissed_reasons: dict[str, str] = {}
         for d in agent_analysis.get("dismissed", []):
             if isinstance(d, dict) and d.get("rule_id"):
-                raw = _shorten_rule_refs(d.get("reason", ""))
-                dismissed_reasons[d["rule_id"]] = _truncate_reason(
-                    raw, 80,
+                dismissed_reasons[d["rule_id"]] = _shorten_rule_refs(
+                    d.get("reason", ""),
                 )
 
         # Deduplicate by rule_id+path+line for display
@@ -595,9 +593,14 @@ class DecisionEngine:
             # Default reasons when agent didn't provide one
             if not reason:
                 if verdict == "noise":
-                    reason = "not analyzed by agent"
+                    msg = f.message[:60] if f.message else ""
+                    reason = (f"not analyzed — {msg}"
+                              if msg else "not analyzed by agent")
                 elif verdict == "safety-net":
-                    reason = "HIGH/CRITICAL not confirmed by agent"
+                    msg = f.message[:60] if f.message else ""
+                    reason = (f"safety-net — {msg}"
+                              if msg
+                              else "HIGH/CRITICAL not confirmed by agent")
 
             rows.append((
                 f.severity.value.upper(), short_rule,
@@ -674,6 +677,17 @@ class DecisionEngine:
             agent_ctx = agent_by_rule.get(f.rule_id, {})
             is_safety = (f.rule_id in safety_rule_ids
                          and f.rule_id not in confirmed_rule_ids)
+            agent_reason = agent_ctx.get("reason", "")
+            agent_rec = agent_ctx.get("recommendation", "")
+            # Safety-net fallback: use Semgrep message when agent didn't analyze
+            if is_safety and not agent_reason:
+                agent_reason = f.message or ""
+            if is_safety and not agent_rec:
+                sev_label = f.severity.value.upper()
+                agent_rec = (
+                    f"Review this finding — flagged by Semgrep "
+                    f"as {sev_label}, not confirmed by AI agent"
+                )
             result.append({
                 "finding_id": f.finding_id,
                 "rule_id": f.rule_id,
@@ -681,8 +695,8 @@ class DecisionEngine:
                 "line": f.line,
                 "severity": f.severity.value,
                 "message": f.message,
-                "agent_reason": agent_ctx.get("reason", ""),
-                "agent_recommendation": agent_ctx.get("recommendation", ""),
+                "agent_reason": agent_reason,
+                "agent_recommendation": agent_rec,
                 "source": "safety-net" if is_safety else "confirmed",
             })
         return result

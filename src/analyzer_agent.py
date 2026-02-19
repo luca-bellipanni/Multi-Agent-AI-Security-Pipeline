@@ -122,6 +122,23 @@ DISMISSAL CRITERIA (use ONLY these reasons):
 - "not_exploitable" — Code context shows the pattern is safe (explain specifically why)
 Do NOT dismiss HIGH/CRITICAL findings without strong justification.
 
+REASONING QUALITY (mandatory for every finding):
+For CONFIRMED findings your "reason" must:
+- Name the specific variables and functions involved (e.g., "user_input from request.args['q']")
+- Describe the data flow (source → sink) that makes it exploitable
+- State the ATTACK SCENARIO in one sentence (e.g., "attacker controls q → SQL injection → data exfiltration")
+Your "recommendation" must be ACTIONABLE with code-level guidance, not generic advice.
+GOOD reason: "Variable `user_email` from request.form is interpolated into cursor.execute() via f-string without parameterization"
+BAD reason: "SQL injection vulnerability found"
+
+For DISMISSED findings your "reason" must:
+- Start with the category prefix, then explain WHY specifically
+- BANNED: generic phrases without context ("False positive", "Not related to the PR", "Not exploitable")
+- Every dismissal must reference specific code context that justifies it
+GOOD: "not_exploitable: input is validated by sanitize_input() at line 12 which strips special chars before the query at line 28"
+BAD: "not_exploitable: False positive"
+BAD: "not_exploitable: Not directly related to the PR"
+
 When your analysis is complete, call final_answer() with a dict containing these keys:
 
 SEVERITY LABELS: Use ONLY these values: "CRITICAL", "HIGH", "MEDIUM", "LOW".
@@ -134,14 +151,16 @@ Map: ERROR → HIGH, WARNING → MEDIUM, INFO → LOW.
   "findings_analyzed": 19,
   "confirmed": [
     {"rule_id": "rule.id", "severity": "HIGH", "path": "file.py", "line": 42,
-     "reason": "Detailed explanation of why this is a real security issue",
-     "recommendation": "How to fix this issue"}
+     "reason": "`user_email` from request.form['email'] is interpolated into cursor.execute() via f-string at line 42 without parameterization — attacker controls email → SQL injection → data exfiltration",
+     "recommendation": "Use parameterized query: cursor.execute('SELECT * FROM users WHERE email = %s', (user_email,))"}
   ],
   "dismissed": [
     {"rule_id": "rule.id", "severity": "MEDIUM", "path": "app.py",
-     "line": 28, "reason": "duplicate: same issue covered by rule X at line 42"},
+     "line": 28, "reason": "duplicate: same SQL injection vulnerability already confirmed as rule.other at line 42"},
     {"rule_id": "rule.id", "severity": "LOW", "path": "tests/test_x.py",
-     "line": 10, "reason": "test_file: informational rule in test code"}
+     "line": 10, "reason": "test_file: test helper uses mock database cursor, no real query execution"},
+    {"rule_id": "rule.id", "severity": "MEDIUM", "path": "utils.py",
+     "line": 55, "reason": "not_exploitable: input validated by validate_email() at line 50 which rejects special chars before reaching subprocess at line 55"}
   ],
   "summary": "Executive summary of security posture",
   "risk_assessment": "Overall risk level and key concerns"

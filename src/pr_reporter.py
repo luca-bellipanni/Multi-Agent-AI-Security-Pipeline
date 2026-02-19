@@ -148,8 +148,12 @@ def format_comment(decision: Decision) -> str:
             reason = f.get("agent_reason", "")
             source = f.get("source", "confirmed")
             if not reason and source == "safety-net":
-                reason = ("Flagged by safety net "
-                          "(agent did not confirm this finding)")
+                semgrep_msg = f.get("message", "")
+                if semgrep_msg:
+                    reason = semgrep_msg
+                else:
+                    reason = ("Flagged by safety net "
+                              "(agent did not confirm this finding)")
             if reason:
                 lines.append(f"- Analysis: {reason}")
             rec = f.get("agent_recommendation", "")
