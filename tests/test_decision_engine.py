@@ -11,7 +11,9 @@ from unittest.mock import patch, MagicMock
 
 from src.models import Verdict, Severity, Finding, StepTrace, ToolResult
 from src.github_context import GitHubContext
-from src.decision_engine import DecisionEngine, _normalize_severity
+from src.decision_engine import (
+    DecisionEngine, _normalize_severity, _shorten_rule_refs,
+)
 
 
 def test_normalize_severity_maps_semgrep_labels():
@@ -27,6 +29,46 @@ def test_normalize_severity_maps_semgrep_labels():
     assert _normalize_severity("CRITICAL") == "CRITICAL"
     assert _normalize_severity("") == "?"
     assert _normalize_severity("?") == "?"
+
+
+def test_shorten_rule_refs_replaces_full_rule_ids():
+    """Full Semgrep rule IDs in reasons shortened to short name."""
+    # Typical agent duplicate reason with full rule_id
+    reason = (
+        "duplicate: same issue covered by rule "
+        "python.flask.security.injection.tainted-sql-string at line 16"
+    )
+    result = _shorten_rule_refs(reason)
+    assert "tainted-sql-string" in result
+    assert "python.flask.security" not in result
+    assert "at line 16" in result
+
+
+def test_shorten_rule_refs_short_rule_unchanged():
+    """Short rule name without dots passes through."""
+    reason = "duplicate: see sql-injection at line 5"
+    result = _shorten_rule_refs(reason)
+    assert "sql-injection" in result
+
+
+def test_shorten_rule_refs_no_rule_ref():
+    """Reason with no rule reference passes through unchanged."""
+    reason = "not_exploitable: safe pattern in context"
+    assert _shorten_rule_refs(reason) == reason
+
+
+def test_shorten_rule_refs_multiple_refs():
+    """Multiple rule references in same reason all shortened."""
+    reason = (
+        "duplicate: same issue covered by rule "
+        "python.lang.security.audit.raw-html-format at line 28 "
+        "and rule python.flask.security.injection.render-template-string"
+    )
+    result = _shorten_rule_refs(reason)
+    assert "raw-html-format" in result
+    assert "render-template-string" in result
+    assert "python.lang" not in result
+    assert "python.flask" not in result
 
 
 def _make_context(**overrides) -> GitHubContext:
@@ -1710,6 +1752,61 @@ class TestAnalyzerDiagnosticsPrint:
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
     @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_agent_reasoning_shortens_rule_refs(
+        self, mock_agent, mock_run, capsys,
+    ):
+        """Rule refs in dismissed reasons are shortened in agent output."""
+        mock_run.return_value = {
+            "confirmed": [
+                {"rule_id": "python.flask.injection.sqli",
+                 "severity": "HIGH",
+                 "reason": "SQL injection found"},
+            ],
+            "dismissed": [
+                {"rule_id": "python.lang.audit.raw-html",
+                 "severity": "MEDIUM",
+                 "reason": (
+                     "duplicate: same issue covered by rule "
+                     "python.flask.injection.sqli at line 16"
+                 )},
+            ],
+            "summary": "Found issues",
+            "findings_analyzed": 2,
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        triage = _make_triage()
+        ctx = _make_context()
+
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/test/workspace"
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, triage)
+            out = capsys.readouterr().out
+            # Short rule name visible in reason
+            assert "see sqli at line 16" in out
+            # Full rule path NOT visible
+            assert "python.flask.injection.sqli at line" not in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
     def test_agent_reasoning_no_dismissed(self, mock_agent, mock_run, capsys):
         """No Dismissed section when agent dismisses nothing."""
         mock_run.return_value = {
@@ -2314,6 +2411,51 @@ class TestSmartGateSummaryPrint:
         out = capsys.readouterr().out
         assert "duplicate: covered by sql-injection" in out
         assert "dismissed" in out
+
+    def test_dismissed_reason_shortens_rule_refs(self, capsys):
+        """Long Semgrep rule IDs in dismissed reasons are shortened."""
+        raw = [
+            _make_finding(
+                Severity.HIGH,
+                rule_id="python.flask.security.injection.tainted-sql-string",
+                path="app.py", line=16,
+            ),
+            _make_finding(
+                Severity.MEDIUM,
+                rule_id="python.lang.security.audit.raw-html-format",
+                path="app.py", line=16,
+            ),
+        ]
+        analysis = {
+            "confirmed": [
+                {"rule_id": (
+                    "python.flask.security.injection.tainted-sql-string"
+                ), "severity": "HIGH",
+                 "reason": "SQL injection via f-string"},
+            ],
+            "dismissed": [
+                {"rule_id": (
+                    "python.lang.security.audit.raw-html-format"
+                ), "severity": "MEDIUM",
+                 "reason": (
+                     "duplicate: same issue covered by rule "
+                     "python.flask.security.injection.tainted-sql-string"
+                     " at line 16"
+                 )},
+            ],
+            "findings_analyzed": 2,
+            "summary": "found",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        self._gate(raw, analysis, mode="shadow")
+        out = capsys.readouterr().out
+        # Short rule name visible, full path NOT visible
+        assert "tainted-sql-string" in out
+        assert "python.flask.security.injection" not in out
+        # Agent reason for confirmed still shows
+        assert "SQL injection" in out
 
     def test_safety_net_has_default_reason(self, capsys):
         """Safety-net findings show default reason in table."""

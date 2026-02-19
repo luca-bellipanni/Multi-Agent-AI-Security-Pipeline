@@ -18,6 +18,7 @@ Security (llm-security/output-handling — LLM05):
 """
 
 import os
+import re
 
 from src.models import (
     Decision, Finding, Severity, StepTrace, ToolResult, Verdict,
@@ -75,6 +76,25 @@ def _truncate_reason(text: str, max_len: int = 80) -> str:
     if cut > max_len // 3:
         return text[:cut] + "..."
     return text[:max_len] + "..."
+
+
+def _shorten_rule_refs(reason: str) -> str:
+    """Replace full Semgrep rule IDs in reason text with short names.
+
+    Agent reasons like 'duplicate: same issue covered by rule
+    python.flask.security.injection.tainted-sql-string at line 16'
+    become 'duplicate: see tainted-sql-string at line 16'.
+    """
+    def _replacer(m: re.Match) -> str:
+        full_rule = m.group(1)
+        short = (full_rule.rsplit(".", 1)[-1]
+                 if "." in full_rule else full_rule)
+        return f"see {short}"
+
+    return re.sub(
+        r'(?:same issue covered by |see )?rule\s+([\w][\w.-]+)',
+        _replacer, reason,
+    )
 
 
 class DecisionEngine:
@@ -338,7 +358,7 @@ class DecisionEngine:
                     short_rule = (rule.rsplit(".", 1)[-1]
                                   if "." in rule else rule)
                     sev = _normalize_severity(c.get("severity", "?"))
-                    reason = c.get("reason", "")
+                    reason = _shorten_rule_refs(c.get("reason", ""))
                     short = _truncate_reason(reason, 100)
                     if short:
                         print(f"    - [{sev}] {short_rule}: {short}")
@@ -355,7 +375,9 @@ class DecisionEngine:
                     short_rule = (rule.rsplit(".", 1)[-1]
                                   if "." in rule else rule)
                     sev = _normalize_severity(d.get("severity", "?"))
-                    reason = d.get("reason", "no reason")
+                    reason = _shorten_rule_refs(
+                        d.get("reason", "no reason"),
+                    )
                     short = _truncate_reason(reason, 100)
                     print(f"    - [{sev}] {short_rule}: {short}")
             if semgrep_tool._all_scan_errors:
@@ -522,17 +544,20 @@ class DecisionEngine:
         }
 
         # Separate reason dicts: confirmed vs dismissed (avoid overwrite)
+        # Shorten rule refs BEFORE truncation so the short name survives
         confirmed_reasons: dict[str, str] = {}
         for c in agent_analysis.get("confirmed", []):
             if isinstance(c, dict) and c.get("rule_id"):
+                raw = _shorten_rule_refs(c.get("reason", ""))
                 confirmed_reasons[c["rule_id"]] = _truncate_reason(
-                    c.get("reason", ""), 60,
+                    raw, 80,
                 )
         dismissed_reasons: dict[str, str] = {}
         for d in agent_analysis.get("dismissed", []):
             if isinstance(d, dict) and d.get("rule_id"):
+                raw = _shorten_rule_refs(d.get("reason", ""))
                 dismissed_reasons[d["rule_id"]] = _truncate_reason(
-                    d.get("reason", ""), 60,
+                    raw, 80,
                 )
 
         # Deduplicate by rule_id+path+line for display
