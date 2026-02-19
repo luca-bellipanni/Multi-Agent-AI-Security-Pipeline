@@ -82,6 +82,16 @@ For EACH finding, determine:
 - Is this a DUPLICATE? Another rule already covers the same issue at the same line.
 - Is this NOISE? The rule fires on a generic pattern but the code is safe in context.
 
+DEDUPLICATION IS CRITICAL:
+When multiple rules fire on the SAME LINE for the SAME vulnerability, confirm
+the most specific rule and dismiss the others as "duplicate". For example:
+- Line 34 has subprocess-injection, dangerous-subprocess-use, subprocess-shell-true
+  → Confirm ONE (e.g. subprocess-injection), dismiss the other 2 as duplicate.
+- Line 28 has render-template-string AND raw-html-format
+  → Confirm the template injection, dismiss raw-html-format as duplicate (same line).
+Each distinct vulnerability at a unique location should have ONE confirmed finding.
+The rest covering the same issue at the same line MUST be dismissed as "duplicate".
+
 You MUST account for EVERY finding. No finding should be left unanalyzed.
 Every finding must appear in either "confirmed" or "dismissed" with a reason.
 
@@ -113,6 +123,11 @@ DISMISSAL CRITERIA (use ONLY these reasons):
 Do NOT dismiss HIGH/CRITICAL findings without strong justification.
 
 When your analysis is complete, call final_answer() with a dict containing these keys:
+
+SEVERITY LABELS: Use ONLY these values: "CRITICAL", "HIGH", "MEDIUM", "LOW".
+Do NOT use Semgrep's native labels (ERROR, WARNING, INFO).
+Map: ERROR → HIGH, WARNING → MEDIUM, INFO → LOW.
+
 {
   "rulesets_used": ["p/security-audit", "p/python"],
   "rulesets_rationale": "Python source code with auth changes",
@@ -124,8 +139,8 @@ When your analysis is complete, call final_answer() with a dict containing these
   ],
   "dismissed": [
     {"rule_id": "rule.id", "severity": "MEDIUM", "path": "app.py",
-     "line": 28, "reason": "duplicate: same issue covered by rule X at same line"},
-    {"rule_id": "rule.id", "severity": "INFO", "path": "tests/test_x.py",
+     "line": 28, "reason": "duplicate: same issue covered by rule X at line 42"},
+    {"rule_id": "rule.id", "severity": "LOW", "path": "tests/test_x.py",
      "line": 10, "reason": "test_file: informational rule in test code"}
   ],
   "summary": "Executive summary of security posture",

@@ -46,6 +46,20 @@ _EMPTY_ANALYSIS = {
 }
 
 
+_SEMGREP_SEV_ALIASES = {"ERROR": "HIGH", "WARNING": "MEDIUM", "INFO": "LOW"}
+
+
+def _normalize_severity(sev: str) -> str:
+    """Normalize Semgrep severity aliases to standard labels.
+
+    LLMs sometimes copy Semgrep's native labels (ERROR, WARNING, INFO)
+    instead of the standard HIGH/MEDIUM/LOW we request. This mapping
+    prevents GitHub Actions from misinterpreting [ERROR] as an annotation.
+    """
+    upper = sev.upper() if sev else "?"
+    return _SEMGREP_SEV_ALIASES.get(upper, upper)
+
+
 def _truncate_reason(text: str, max_len: int = 80) -> str:
     """Truncate reason at word boundary, ending at sentence if possible."""
     if not text:
@@ -323,7 +337,7 @@ class DecisionEngine:
                     rule = c.get("rule_id", "?")
                     short_rule = (rule.rsplit(".", 1)[-1]
                                   if "." in rule else rule)
-                    sev = c.get("severity", "?").upper()
+                    sev = _normalize_severity(c.get("severity", "?"))
                     reason = c.get("reason", "")
                     short = _truncate_reason(reason, 100)
                     if short:
@@ -340,7 +354,7 @@ class DecisionEngine:
                     rule = d.get("rule_id", "?")
                     short_rule = (rule.rsplit(".", 1)[-1]
                                   if "." in rule else rule)
-                    sev = d.get("severity", "?").upper()
+                    sev = _normalize_severity(d.get("severity", "?"))
                     reason = d.get("reason", "no reason")
                     short = _truncate_reason(reason, 100)
                     print(f"    - [{sev}] {short_rule}: {short}")

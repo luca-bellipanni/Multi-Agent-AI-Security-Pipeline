@@ -11,7 +11,22 @@ from unittest.mock import patch, MagicMock
 
 from src.models import Verdict, Severity, Finding, StepTrace, ToolResult
 from src.github_context import GitHubContext
-from src.decision_engine import DecisionEngine
+from src.decision_engine import DecisionEngine, _normalize_severity
+
+
+def test_normalize_severity_maps_semgrep_labels():
+    """ERROR/WARNING/INFO mapped to HIGH/MEDIUM/LOW."""
+    assert _normalize_severity("ERROR") == "HIGH"
+    assert _normalize_severity("WARNING") == "MEDIUM"
+    assert _normalize_severity("INFO") == "LOW"
+    assert _normalize_severity("error") == "HIGH"
+    assert _normalize_severity("warning") == "MEDIUM"
+    # Standard labels pass through unchanged
+    assert _normalize_severity("HIGH") == "HIGH"
+    assert _normalize_severity("MEDIUM") == "MEDIUM"
+    assert _normalize_severity("CRITICAL") == "CRITICAL"
+    assert _normalize_severity("") == "?"
+    assert _normalize_severity("?") == "?"
 
 
 def _make_context(**overrides) -> GitHubContext:
@@ -1779,6 +1794,58 @@ class TestAnalyzerDiagnosticsPrint:
             assert "Semgrep errors (2):" in out
             assert "Failed to download p/python" in out
             assert "Network timeout" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_severity_normalized_error_to_high(
+        self, mock_agent, mock_run, capsys,
+    ):
+        """ERROR/WARNING from Semgrep mapped to HIGH/MEDIUM in output."""
+        mock_run.return_value = {
+            "confirmed": [
+                {"rule_id": "sql-injection", "severity": "ERROR",
+                 "reason": "SQL injection found"},
+            ],
+            "dismissed": [
+                {"rule_id": "xss-check", "severity": "WARNING",
+                 "reason": "not_exploitable: safe pattern"},
+            ],
+            "summary": "Found issues",
+            "findings_analyzed": 2,
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        triage = _make_triage()
+        ctx = _make_context()
+
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/test/workspace"
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, triage)
+            out = capsys.readouterr().out
+            # ERROR mapped to HIGH, WARNING mapped to MEDIUM
+            assert "[HIGH] sql-injection:" in out
+            assert "[MEDIUM] xss-check:" in out
+            # Must NOT contain [ERROR] or [WARNING] (GitHub Actions misreads)
+            assert "[ERROR]" not in out
+            assert "[WARNING]" not in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
