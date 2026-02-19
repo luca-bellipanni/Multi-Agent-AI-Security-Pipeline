@@ -2863,3 +2863,45 @@ class TestDismissedDedup:
         # MEDIUM dismissed stays (not promoted by safety-net)
         assert len(decision.dismissed_findings) == 1
         assert decision.dismissed_findings[0]["rule_id"] == "medium-rule"
+
+    def test_short_rule_mismatch_still_deduped(self):
+        """Dismissed with different prefix but same short rule is deduped.
+
+        E.g. safety-net has 'python.lang.security.dangerous-subprocess-use'
+        while dismissed has 'python.flask.security.dangerous-subprocess-use'.
+        Same short rule + same line → should be deduped.
+        """
+        raw = [
+            _make_finding(
+                Severity.HIGH,
+                rule_id="python.lang.security.dangerous-subprocess-use",
+            ),
+        ]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [
+                # Different prefix but same short rule + line
+                {
+                    "rule_id": "python.flask.security.dangerous-subprocess-use",
+                    "severity": "HIGH",
+                    "path": "/github/workspace/app.py",
+                    "line": 10,
+                    "reason": "dup",
+                },
+            ],
+            "findings_analyzed": 1,
+            "summary": "dismissed",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        tr = _make_tool_result(raw)
+        decision = engine._apply_gate(
+            _make_context(mode="enforce"), _make_triage(),
+            [tr], analysis,
+        )
+        # Safety-net promotes the HIGH finding; dismissed with same
+        # short rule + line should be filtered out
+        assert decision.findings_count == 1
+        assert len(decision.dismissed_findings) == 0

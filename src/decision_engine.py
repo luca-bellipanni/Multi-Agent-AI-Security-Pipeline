@@ -1109,10 +1109,17 @@ class DecisionEngine:
                 short = (rid.rsplit(".", 1)[-1] if "." in rid
                          else rid)
                 _confirmed_keys.add((short, ln))
+        def _dismissed_overlaps(d: dict) -> bool:
+            rid = d.get("rule_id", "")
+            ln = d.get("line", 0)
+            if (rid, ln) in _confirmed_keys:
+                return True
+            short = rid.rsplit(".", 1)[-1] if "." in rid else rid
+            return (short, ln) in _confirmed_keys
+
         dismissed_structured = [
             d for d in agent_analysis.get("dismissed", [])
-            if (d.get("rule_id", ""), d.get("line", 0))
-            not in _confirmed_keys
+            if not _dismissed_overlaps(d)
         ]
         excepted_structured = excepted_info
 
