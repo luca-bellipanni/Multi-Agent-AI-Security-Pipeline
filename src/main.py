@@ -37,9 +37,8 @@ def _run_scan(ctx: GitHubContext) -> int:
     print("::group::Results")
     print(f"Decision: {decision.verdict.value}")
     print(f"Findings: {decision.findings_count}")
-    print(f"Reason: {decision.reason}")
     if decision.safety_warnings:
-        print(f"\n*** {len(decision.safety_warnings)} SAFETY WARNING(S) ***")
+        print(f"Safety warnings: {len(decision.safety_warnings)}")
     print("::endgroup::")
 
     # Save exception memory (auto-exceptions for next run)

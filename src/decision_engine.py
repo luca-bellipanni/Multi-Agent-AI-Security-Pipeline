@@ -192,6 +192,10 @@ class DecisionEngine:
             langs = ", ".join(triage_ctx.get("languages", [])) or "unknown"
             risks = ", ".join(triage_ctx.get("risk_areas", [])) or "none detected"
             print(f"  {files} file(s) | {langs} | risk: {risks}")
+            agents = ", ".join(
+                result.get("recommended_agents", ["appsec"]),
+            )
+            print(f"  decision: {agents}")
 
             tools_used: dict[str, int] = {}
             if fetch_tool is not None and fetch_tool._call_count > 0:
@@ -274,9 +278,14 @@ class DecisionEngine:
             )
             print(f"AppSec Agent complete: {analysis.get('summary', 'N/A')}")
 
-            # Semgrep diagnostics
+            # Essential diagnostics (always shown)
             print(f"  Semgrep: {semgrep_tool._call_count} scan(s), "
                   f"{len(semgrep_tool._all_raw_findings)} finding(s)")
+            if semgrep_tool._all_configs_used:
+                configs = ", ".join(semgrep_tool._all_configs_used)
+                print(f"  Configs: {configs}")
+            if diff_tool is not None and diff_tool._call_count > 0:
+                print(f"  Diff: {diff_tool._call_count} call(s)")
             if semgrep_tool._all_scan_errors:
                 print(f"  Semgrep errors "
                       f"({len(semgrep_tool._all_scan_errors)}):")
@@ -284,52 +293,34 @@ class DecisionEngine:
                     msg = (e.get("message", str(e))
                            if isinstance(e, dict) else str(e))
                     print(f"    - {msg[:200]}")
-            if diff_tool is not None and diff_tool._call_count > 0:
-                print(f"  Diff: {diff_tool._call_count} call(s)")
-            print(f"  Workspace: {semgrep_tool.workspace_path}")
-            if semgrep_tool._all_configs_used:
-                configs = ", ".join(semgrep_tool._all_configs_used)
-                print(f"  Configs: {configs}")
-            else:
-                print("  Configs: (none — agent never called run_semgrep?)")
 
-            # Extended diagnostics: command, files scanned, workspace listing
-            if semgrep_tool._last_cmd:
-                print(f"  Command: {' '.join(semgrep_tool._last_cmd)}")
-            if semgrep_tool._last_files_scanned:
-                print(f"  Files scanned ({len(semgrep_tool._last_files_scanned)}):")
-                for fp in semgrep_tool._last_files_scanned[:20]:
-                    print(f"    - {fp}")
-            elif semgrep_tool._call_count > 0:
-                print("  Files scanned: 0 (Semgrep scanned no files!)")
-            if semgrep_tool._last_stderr:
-                stderr_preview = semgrep_tool._last_stderr.strip()[:2000]
-                print(f"  Stderr: {stderr_preview}")
-            # Workspace listing: show what's actually on disk
-            ws = semgrep_tool.workspace_path
-            ws_exists = os.path.isdir(ws)
-            print(f"  Workspace exists: {ws_exists}")
-            if ws_exists:
-                try:
-                    entries = sorted(os.listdir(ws))[:30]
-                    print(f"  Workspace files ({len(entries)}):")
-                    for entry in entries:
-                        print(f"    - {entry}")
-                except OSError as e:
-                    print(f"  Workspace listing error: {e}")
-
-            # Agent findings table
-            confirmed = analysis.get("confirmed", [])
-            dismissed = analysis.get("dismissed", [])
-            if confirmed or dismissed:
-                print(f"\n  Agent findings ({len(confirmed)} confirmed, "
-                      f"{len(dismissed)} dismissed):")
-                for c in confirmed:
-                    sev = c.get("severity", "?").upper()
-                    rule = c.get("rule_id", "?")
-                    path = c.get("path", "?")
-                    line = c.get("line", "?")
-                    print(f"    [{sev:<8s}] {rule} — {path}:{line}")
+            # Debug diagnostics (only when Semgrep ran but found 0 findings)
+            if (semgrep_tool._call_count > 0
+                    and len(semgrep_tool._all_raw_findings) == 0):
+                print("  WARNING: Semgrep ran but found 0 findings — "
+                      "debug info:")
+                if semgrep_tool._last_cmd:
+                    print(f"    Command: "
+                          f"{' '.join(semgrep_tool._last_cmd)}")
+                if semgrep_tool._last_files_scanned:
+                    print(f"    Files scanned: "
+                          f"{len(semgrep_tool._last_files_scanned)}")
+                else:
+                    print("    Files scanned: 0 "
+                          "(Semgrep scanned no files!)")
+                if semgrep_tool._last_stderr:
+                    stderr_preview = (
+                        semgrep_tool._last_stderr.strip()[:2000]
+                    )
+                    print(f"    Stderr: {stderr_preview}")
+                ws = semgrep_tool.workspace_path
+                if os.path.isdir(ws):
+                    try:
+                        entries = sorted(os.listdir(ws))[:15]
+                        print(f"    Workspace ({len(entries)} files): "
+                              f"{', '.join(entries[:10])}")
+                    except OSError:
+                        pass
 
             # CUMULATIVE SIDE CHANNEL: read ALL findings from ALL tool calls
             raw_findings = semgrep_tool._all_raw_findings
@@ -437,6 +428,87 @@ class DecisionEngine:
             or len(agent_analysis.get("confirmed", [])) > 0
             or len(agent_analysis.get("dismissed", [])) > 0
         )
+
+    def _print_findings_table(
+        self,
+        raw_findings: list[Finding],
+        agent_analysis: dict,
+        safety_warnings: list[dict],
+    ) -> None:
+        """Print ASCII table of all raw findings with agent verdict."""
+        if not raw_findings:
+            return
+
+        confirmed_rules = {
+            c["rule_id"] for c in agent_analysis.get("confirmed", [])
+            if isinstance(c, dict) and isinstance(c.get("rule_id"), str)
+        }
+        dismissed_rules = {
+            d["rule_id"] for d in agent_analysis.get("dismissed", [])
+            if isinstance(d, dict) and isinstance(d.get("rule_id"), str)
+        }
+        safety_net_rules = {
+            w["rule_id"] for w in safety_warnings
+            if isinstance(w, dict) and isinstance(w.get("rule_id"), str)
+        }
+
+        # Agent reasons (keyed by rule_id for lookup)
+        agent_reasons: dict[str, str] = {}
+        for c in agent_analysis.get("confirmed", []):
+            if isinstance(c, dict) and c.get("rule_id"):
+                agent_reasons[c["rule_id"]] = c.get("reason", "")[:40]
+        for d in agent_analysis.get("dismissed", []):
+            if isinstance(d, dict) and d.get("rule_id"):
+                agent_reasons[d["rule_id"]] = d.get("reason", "")[:40]
+
+        # Deduplicate by rule_id+path+line for display
+        seen: set[tuple[str, str, int]] = set()
+        rows: list[tuple[str, str, str, str, str]] = []
+        for f in raw_findings:
+            key = (f.rule_id, f.path, f.line)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if f.rule_id in confirmed_rules:
+                verdict = "confirmed"
+            elif f.rule_id in dismissed_rules:
+                if f.rule_id in safety_net_rules:
+                    verdict = "safety-net"
+                else:
+                    verdict = "dismissed"
+            elif f.rule_id in safety_net_rules:
+                verdict = "safety-net"
+            else:
+                verdict = "noise"
+
+            short_rule = (f.rule_id.rsplit(".", 1)[-1]
+                          if "." in f.rule_id else f.rule_id)
+            short_path = (f.path.rsplit("/", 1)[-1]
+                          if "/" in f.path else f.path)
+            reason = agent_reasons.get(f.rule_id, "")
+
+            rows.append((
+                f.severity.value.upper(), short_rule,
+                f"{short_path}:{f.line}", verdict, reason,
+            ))
+
+        n_confirmed = sum(1 for r in rows if r[3] == "confirmed")
+        n_safety = sum(1 for r in rows if r[3] == "safety-net")
+        n_dismissed = sum(1 for r in rows if r[3] == "dismissed")
+        n_noise = sum(1 for r in rows if r[3] == "noise")
+
+        print(f"\n  Findings table ({len(rows)} unique):")
+        print(f"  {'SEV':<10s} {'RULE':<30s} "
+              f"{'FILE:LINE':<25s} {'VERDICT':<12s} REASON")
+        print(f"  {'─' * 10} {'─' * 30} "
+              f"{'─' * 25} {'─' * 12} {'─' * 30}")
+        for sev, rule, loc, vrd, rsn in rows:
+            print(f"  {sev:<10s} {rule:<30s} "
+                  f"{loc:<25s} {vrd:<12s} {rsn}")
+        print(f"\n  Summary: {n_confirmed} confirmed, "
+              f"{n_safety} safety-net, "
+              f"{n_dismissed} dismissed, {n_noise} noise")
 
     def _validate_agent_confirmed(
         self,
@@ -726,6 +798,11 @@ class DecisionEngine:
             effective_findings = list(active_findings)
             safety_warnings = []
 
+        # Findings table (after validation + safety net)
+        self._print_findings_table(
+            active_findings, agent_analysis, safety_warnings,
+        )
+
         # Auto-add new exceptions from agent's dismissed LOW/MEDIUM
         if self._agent_has_analyzed(agent_analysis):
             new_exc = memory_store.add_auto_exceptions(
@@ -765,14 +842,23 @@ class DecisionEngine:
 
         # Smart Gate summary (always visible in CI logs)
         raw_count = len(raw_findings)
-        agent_confirmed_count = len(agent_analysis.get("confirmed", []))
+        confirmed_rules = len({
+            c["rule_id"] for c in agent_analysis.get("confirmed", [])
+            if isinstance(c, dict) and isinstance(c.get("rule_id"), str)
+        })
         print(f"  Scanner: {raw_count} raw finding(s)")
-        if agent_confirmed_count:
-            print(f"  Agent: {agent_confirmed_count} confirmed "
-                  f"-> {findings_count} validated")
-        if agent_confirmed_count > 0 and findings_count == 0:
-            print(f"  Warning: {agent_confirmed_count} agent finding(s) "
+        if confirmed_rules:
+            if findings_count != confirmed_rules:
+                print(f"  Agent: {confirmed_rules} rule(s) confirmed "
+                      f"\u2192 {findings_count} raw match(es)")
+            else:
+                print(f"  Agent: {findings_count} finding(s) confirmed")
+        if confirmed_rules > 0 and findings_count == 0:
+            print(f"  Warning: {confirmed_rules} agent finding(s) "
                   f"not confirmed by scanner")
+        if safety_warnings:
+            print(f"  Safety net: {len(safety_warnings)} warning(s) "
+                  f"(HIGH/CRITICAL missed by agent)")
         print(f"  Mode: {ctx.mode}")
 
         excepted_count = len(excepted_info)
@@ -786,16 +872,27 @@ class DecisionEngine:
 
         # Shadow mode: always allow, but report everything
         if ctx.mode == "shadow":
-            raw_count = len(raw_findings)
+            severity_parts = []
+            for sev in (Severity.CRITICAL, Severity.HIGH,
+                        Severity.MEDIUM, Severity.LOW):
+                count = eff_counts.get(sev, 0)
+                if count > 0:
+                    severity_parts.append(f"{count} {sev.value}")
+            sev_str = (f" ({', '.join(severity_parts)})"
+                       if severity_parts else "")
+            safety_str = (
+                f", {len(safety_warnings)} safety warning(s)"
+                if safety_warnings else ""
+            )
             return Decision(
                 verdict=Verdict.ALLOWED,
                 continue_pipeline=True,
                 max_severity=max_raw_severity,
                 selected_tools=["semgrep"],
                 reason=(
-                    f"Shadow mode: {raw_count} raw finding(s), "
-                    f"{findings_count} confirmed. "
-                    f"Triage: {ai_reason}"
+                    f"Shadow mode: {raw_count} raw, "
+                    f"{findings_count} confirmed{sev_str}"
+                    f"{safety_str}."
                 ),
                 mode=ctx.mode,
                 findings_count=findings_count,
