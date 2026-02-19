@@ -319,8 +319,8 @@ class TestFormatComment:
         body = format_comment(d)
         assert "Auto-excepted" not in body
 
-    def test_dismissed_in_unified_table(self):
-        """Dismissed findings appear in the unified table with IDs."""
+    def test_dismissed_in_collapsed_section(self):
+        """Dismissed findings appear in collapsed section with IDs."""
         d = _make_decision(dismissed_findings=[
             {"rule_id": "python.test.rule", "path": "a.py",
              "line": 10, "reason": "test file", "severity": "medium"},
@@ -328,8 +328,8 @@ class TestFormatComment:
              "line": 20, "reason": "false positive", "severity": "low"},
         ])
         body = format_comment(d)
-        # Dismissed in unified table (not separate section)
-        assert "dismissed" in body
+        # Dismissed in collapsed section
+        assert "Dismissed by agent (2)" in body
         # Short rule names
         assert "`rule`" in body
         # Finding IDs computed
@@ -366,17 +366,17 @@ class TestFormatComment:
         assert "dup F63b1ad" in body
 
     def test_dismissed_no_path_fallback(self):
-        """Dismissed without path/line shows in table with ? fallbacks."""
+        """Dismissed without path/line shows in collapsed section with ?."""
         d = _make_decision(dismissed_findings=[
             {"rule_id": "test.rule", "reason": "test file"},
         ])
         body = format_comment(d)
-        assert "dismissed" in body
+        assert "Dismissed by agent (1)" in body
         assert "`rule`" in body
         assert "test file" in body
 
-    def test_unified_table_has_verdict_and_reason(self):
-        """Unified table includes Verdict and Reason columns."""
+    def test_findings_table_and_dismissed_separate(self):
+        """Findings table has confirmed only; dismissed in collapsed."""
         d = _make_decision(
             confirmed_findings=[{
                 "finding_id": "Fabc123",
@@ -398,19 +398,17 @@ class TestFormatComment:
             }],
         )
         body = format_comment(d)
-        # Unified table headers
+        # Findings table headers
         assert "Verdict" in body
         assert "Reason" in body
-        # Confirmed in table
+        # Confirmed in main table
         assert "confirmed" in body
         assert "Attacker controls input" in body
-        # Dismissed in table (not separate section)
-        assert "dismissed" in body
+        # Dismissed in collapsed section
+        assert "Dismissed by agent (1)" in body
         assert "test_file: test helper uses mock" in body
-        # No separate "Dismissed by agent" section
-        assert "Dismissed by agent" not in body
-        # Total count includes both
-        assert "### Findings (2)" in body
+        # Findings count is only confirmed
+        assert "### Findings (1)" in body
 
     def test_no_dismissed_no_section(self):
         d = _make_decision(dismissed_findings=[])
@@ -469,6 +467,42 @@ class TestFormatComment:
         )
         body = format_comment(d)
         assert "### Next steps" not in body
+
+    def test_dismissed_not_in_main_table(self):
+        """Dismissed findings should NOT appear in the main findings table."""
+        d = _make_decision(
+            confirmed_findings=[{
+                "finding_id": "Fabc123",
+                "rule_id": "sqli",
+                "path": "app.py",
+                "line": 10,
+                "severity": "high",
+                "message": "SQL injection",
+                "agent_reason": "Confirmed",
+                "agent_recommendation": "Fix",
+            }],
+            dismissed_findings=[{
+                "rule_id": "noise.rule",
+                "path": "app.py",
+                "line": 20,
+                "severity": "low",
+                "reason": "false positive",
+            }],
+        )
+        body = format_comment(d)
+        # Main table only has 1 finding (confirmed)
+        assert "### Findings (1)" in body
+        # Dismissed in separate collapsed section
+        assert "Dismissed by agent (1)" in body
+        # Main table should not have "dismissed" as verdict
+        table_lines = [
+            l for l in body.split("\n")
+            if l.startswith("| F")
+        ]
+        for line in table_lines:
+            if "| confirmed |" in line:
+                continue
+            assert "| dismissed |" not in line
 
 
 # --- _format_tools_used ---

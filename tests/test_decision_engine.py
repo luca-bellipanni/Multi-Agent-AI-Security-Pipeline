@@ -1715,6 +1715,22 @@ class TestTriageContextSummary:
         out = capsys.readouterr().out
         assert "Decision: APPSEC" in out
 
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.agent.run_triage")
+    @patch("src.agent.create_triage_agent")
+    def test_parse_failed_shows_warning(self, mock_agent, mock_run, capsys):
+        """When triage parse fails, shows warning instead of 0 files."""
+        mock_run.return_value = _make_triage(
+            reason="AI response could not be parsed, using default agent.",
+        )
+        engine = DecisionEngine()
+        engine._run_triage(_make_context())
+        out = capsys.readouterr().out
+        assert "parse failed" in out
+        assert "0 file(s)" not in out
+        # Decision still shown
+        assert "Decision:" in out
+
 
 # --- A4 + B3: Semgrep diagnostics + Agent findings table ---
 
@@ -2787,3 +2803,63 @@ class TestSmartGateSummaryPrint:
         # Boxed gate verdict with finding count
         assert "GATE DECISION" in out
         assert "1 confirmed finding(s)" in out
+
+
+class TestDismissedDedup:
+    """Dismissed findings that safety-net promoted are deduped."""
+
+    def test_safety_net_overlap_removed(self):
+        """Dismissed entry for same rule+line as safety-net is removed."""
+        raw = [_make_finding(Severity.HIGH, rule_id="dangerous-rule")]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [
+                {"rule_id": "dangerous-rule", "severity": "HIGH",
+                 "path": "/github/workspace/app.py", "line": 10,
+                 "reason": "not exploitable"},
+            ],
+            "findings_analyzed": 1,
+            "summary": "dismissed",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        tr = _make_tool_result(raw)
+        decision = engine._apply_gate(
+            _make_context(mode="enforce"), _make_triage(),
+            [tr], analysis,
+        )
+        # Safety-net promotes the HIGH finding to confirmed
+        assert decision.findings_count == 1
+        # The dismissed_findings should NOT include the promoted finding
+        dismissed_rules = [
+            d.get("rule_id") for d in decision.dismissed_findings
+        ]
+        assert "dangerous-rule" not in dismissed_rules
+
+    def test_non_safety_net_dismissed_kept(self):
+        """Dismissed MEDIUM findings (not safety-net) are preserved."""
+        raw = [_make_finding(Severity.MEDIUM, rule_id="medium-rule")]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [
+                {"rule_id": "medium-rule", "severity": "MEDIUM",
+                 "path": "/github/workspace/app.py", "line": 10,
+                 "reason": "test file"},
+            ],
+            "findings_analyzed": 1,
+            "summary": "dismissed",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        tr = _make_tool_result(raw)
+        decision = engine._apply_gate(
+            _make_context(mode="enforce"), _make_triage(),
+            [tr], analysis,
+        )
+        # MEDIUM dismissed stays (not promoted by safety-net)
+        assert len(decision.dismissed_findings) == 1
+        assert decision.dismissed_findings[0]["rule_id"] == "medium-rule"

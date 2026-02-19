@@ -124,8 +124,8 @@ def format_comment(decision: Decision) -> str:
             _id_lookup[(rule, line)] = fid
             _id_lookup[(_short_rule(rule), line)] = fid
 
-    # Unified findings table (confirmed + safety-net + dismissed)
-    all_rows: list[dict] = []
+    # Confirmed + safety-net findings table
+    confirmed_rows: list[dict] = []
     for f in decision.confirmed_findings:
         source = f.get("source", "confirmed")
         reason = f.get("agent_reason", "")
@@ -134,7 +134,7 @@ def format_comment(decision: Decision) -> str:
                 "Flagged by safety net "
                 "(agent did not confirm this finding)"
             )
-        all_rows.append({
+        confirmed_rows.append({
             "fid": f.get("finding_id", "?"),
             "sev": f.get("severity", "?").upper(),
             "rule": f.get("rule_id", "?"),
@@ -144,28 +144,9 @@ def format_comment(decision: Decision) -> str:
                        else "confirmed",
             "reason": reason,
         })
-    for d in decision.dismissed_findings:
-        rule_id = d.get("rule_id", "?")
-        path = d.get("path", "")
-        line_num = d.get("line", 0)
-        reason = d.get("reason", "no reason")
-        if path and line_num:
-            fid = _compute_finding_id(rule_id, path, line_num)
-            reason = _resolve_duplicate_refs(reason, _id_lookup)
-        else:
-            fid = "?"
-        all_rows.append({
-            "fid": fid,
-            "sev": d.get("severity", "?").upper(),
-            "rule": rule_id,
-            "path": path or "?",
-            "line": line_num or "?",
-            "verdict": "dismissed",
-            "reason": reason,
-        })
 
-    if all_rows:
-        lines.append(f"### Findings ({len(all_rows)})")
+    if confirmed_rows:
+        lines.append(f"### Findings ({len(confirmed_rows)})")
         lines.append("")
         lines.append(
             "| ID | Sev | Rule | File:Line | Verdict | Reason |"
@@ -173,7 +154,7 @@ def format_comment(decision: Decision) -> str:
         lines.append(
             "|----|-----|------|-----------|---------|--------|"
         )
-        for r in all_rows:
+        for r in confirmed_rows:
             rule = f"`{_short_rule(r['rule'])}`"
             path = _short_path(r["path"])
             loc = f"`{path}:{r['line']}`"
@@ -183,39 +164,35 @@ def format_comment(decision: Decision) -> str:
             )
         lines.append("")
 
-        # Details (collapsible) — confirmed + safety-net only
-        confirmed_rows = [
-            r for r in all_rows if r["verdict"] != "dismissed"
-        ]
-        if confirmed_rows:
-            lines.append("<details><summary>Details</summary>")
+        # Details (collapsible)
+        lines.append("<details><summary>Details</summary>")
+        lines.append("")
+        for f in decision.confirmed_findings:
+            fid = f.get("finding_id", "?")
+            sev = f.get("severity", "?").upper()
+            rule = _short_rule(f.get("rule_id", "?"))
+            path = _short_path(f.get("path", "?"))
+            line = f.get("line", "?")
+            lines.append(
+                f"**{fid}** [{sev}] `{rule}` at `{path}:{line}`"
+            )
+            reason = f.get("agent_reason", "")
+            source = f.get("source", "confirmed")
+            if not reason and source == "safety-net":
+                semgrep_msg = f.get("message", "")
+                if semgrep_msg:
+                    reason = semgrep_msg
+                else:
+                    reason = ("Flagged by safety net "
+                              "(agent did not confirm this finding)")
+            if reason:
+                lines.append(f"- Analysis: {reason}")
+            rec = f.get("agent_recommendation", "")
+            if rec:
+                lines.append(f"- Fix: {rec}")
             lines.append("")
-            for f in decision.confirmed_findings:
-                fid = f.get("finding_id", "?")
-                sev = f.get("severity", "?").upper()
-                rule = _short_rule(f.get("rule_id", "?"))
-                path = _short_path(f.get("path", "?"))
-                line = f.get("line", "?")
-                lines.append(
-                    f"**{fid}** [{sev}] `{rule}` at `{path}:{line}`"
-                )
-                reason = f.get("agent_reason", "")
-                source = f.get("source", "confirmed")
-                if not reason and source == "safety-net":
-                    semgrep_msg = f.get("message", "")
-                    if semgrep_msg:
-                        reason = semgrep_msg
-                    else:
-                        reason = ("Flagged by safety net "
-                                  "(agent did not confirm this finding)")
-                if reason:
-                    lines.append(f"- Analysis: {reason}")
-                rec = f.get("agent_recommendation", "")
-                if rec:
-                    lines.append(f"- Fix: {rec}")
-                lines.append("")
-            lines.append("</details>")
-            lines.append("")
+        lines.append("</details>")
+        lines.append("")
 
         # Safety-net explanation (brief note under table)
         safety_count = sum(
@@ -230,6 +207,46 @@ def format_comment(decision: Decision) -> str:
                 f"precaution — review required."
             )
             lines.append("")
+
+    # Dismissed findings (collapsed)
+    dismissed_rows: list[dict] = []
+    for d in decision.dismissed_findings:
+        rule_id = d.get("rule_id", "?")
+        path = d.get("path", "")
+        line_num = d.get("line", 0)
+        reason = d.get("reason", "no reason")
+        if path and line_num:
+            fid = _compute_finding_id(rule_id, path, line_num)
+            reason = _resolve_duplicate_refs(reason, _id_lookup)
+        else:
+            fid = "?"
+        dismissed_rows.append({
+            "fid": fid,
+            "sev": d.get("severity", "?").upper(),
+            "rule": rule_id,
+            "path": path or "?",
+            "line": line_num or "?",
+            "reason": reason,
+        })
+    if dismissed_rows:
+        lines.append(
+            f"<details><summary>Dismissed by agent"
+            f" ({len(dismissed_rows)})</summary>"
+        )
+        lines.append("")
+        lines.append("| ID | Sev | Rule | File:Line | Reason |")
+        lines.append("|----|-----|------|-----------|--------|")
+        for r in dismissed_rows:
+            rule = f"`{_short_rule(r['rule'])}`"
+            path = _short_path(r["path"])
+            loc = f"`{path}:{r['line']}`"
+            lines.append(
+                f"| {r['fid']} | {r['sev']} | {rule} | {loc} "
+                f"| {r['reason']} |"
+            )
+        lines.append("")
+        lines.append("</details>")
+        lines.append("")
 
     # Excepted findings (collapsible)
     if decision.excepted_findings:

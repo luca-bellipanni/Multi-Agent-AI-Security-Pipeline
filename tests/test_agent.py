@@ -241,6 +241,42 @@ class TestParseTriageErrors:
         assert isinstance(result["context"], dict)
         assert isinstance(result["context"]["languages"], list)
 
+    def test_python_dict_single_quotes_parsed(self):
+        """ast.literal_eval parses Python dict with single quotes."""
+        response = (
+            "Here's the result: {'context': {'languages': ['python'],"
+            " 'files_changed': 3, 'risk_areas': ['authentication'],"
+            " 'has_dependency_changes': False,"
+            " 'has_iac_changes': False,"
+            " 'change_summary': 'Auth changes'},"
+            " 'recommended_agents': ['appsec'],"
+            " 'reason': 'Code changes detected'}"
+        )
+        result = parse_triage_response(response)
+        assert result["context"]["languages"] == ["python"]
+        assert result["context"]["files_changed"] == 3
+        assert result["context"]["risk_areas"] == ["authentication"]
+        assert result["recommended_agents"] == ["appsec"]
+
+    def test_python_dict_true_false_parsed(self):
+        """ast.literal_eval handles True/False (not true/false)."""
+        response = (
+            "{'context': {'languages': [], 'files_changed': 0,"
+            " 'risk_areas': [], 'has_dependency_changes': True,"
+            " 'has_iac_changes': False, 'change_summary': 'deps'},"
+            " 'recommended_agents': ['appsec'],"
+            " 'reason': 'Dep changes'}"
+        )
+        result = parse_triage_response(response)
+        assert result["context"]["has_dependency_changes"] is True
+        assert result["reason"] == "Dep changes"
+
+    def test_non_dict_literal_eval_returns_default(self):
+        """ast.literal_eval of non-dict still returns default."""
+        result = parse_triage_response("[1, 2, 3]")
+        assert result["recommended_agents"] == ["appsec"]
+        assert "could not be parsed" in result["reason"].lower()
+
 
 # ── build_triage_task ────────────────────────────────────────────────
 

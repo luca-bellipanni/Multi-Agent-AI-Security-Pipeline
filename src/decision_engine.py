@@ -328,8 +328,14 @@ class DecisionEngine:
             agents = ", ".join(
                 result.get("recommended_agents", ["appsec"]),
             )
-            print(f"\n  📋 {files} file(s) | {langs}")
-            print(f"  ⚠  Risk areas: {risks}")
+            parse_failed = "could not be parsed" in result.get(
+                "reason", "").lower()
+            if parse_failed:
+                print("\n  ⚠  Triage AI: response parse failed"
+                      " — running with default context")
+            else:
+                print(f"\n  📋 {files} file(s) | {langs}")
+                print(f"  ⚠  Risk areas: {risks}")
             print(f"\n  ➜  Decision: {agents.upper()}")
 
             tools_used: dict[str, int] = {}
@@ -1093,7 +1099,21 @@ class DecisionEngine:
         confirmed_structured = self._build_confirmed_structured(
             effective_findings, agent_analysis, safety_warnings,
         )
-        dismissed_structured = agent_analysis.get("dismissed", [])
+        # Dedup: remove dismissed entries that safety-net promoted to confirmed
+        _confirmed_keys: set[tuple[str, int]] = set()
+        for cf in confirmed_structured:
+            if cf.get("source") == "safety-net":
+                rid = cf.get("rule_id", "")
+                ln = cf.get("line", 0)
+                _confirmed_keys.add((rid, ln))
+                short = (rid.rsplit(".", 1)[-1] if "." in rid
+                         else rid)
+                _confirmed_keys.add((short, ln))
+        dismissed_structured = [
+            d for d in agent_analysis.get("dismissed", [])
+            if (d.get("rule_id", ""), d.get("line", 0))
+            not in _confirmed_keys
+        ]
         excepted_structured = excepted_info
 
         # Shadow mode: always allow, but report everything
