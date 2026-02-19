@@ -12,7 +12,8 @@ from unittest.mock import patch, MagicMock
 from src.models import Verdict, Severity, Finding, StepTrace, ToolResult
 from src.github_context import GitHubContext
 from src.decision_engine import (
-    DecisionEngine, _normalize_severity, _shorten_rule_refs,
+    DecisionEngine, _normalize_severity, _resolve_dup_ids,
+    _shorten_rule_refs,
 )
 
 
@@ -69,6 +70,41 @@ def test_shorten_rule_refs_multiple_refs():
     assert "render-template-string" in result
     assert "python.lang" not in result
     assert "python.flask" not in result
+
+
+def test_resolve_dup_ids_confirmed_as():
+    """Resolve 'confirmed as rule at line' to 'dup Fxxxxxx'."""
+    lookup = {("tainted-sql-string", 16): "F63b1ad"}
+    reason = (
+        "duplicate: same SQL injection already confirmed as "
+        "tainted-sql-string at line 16"
+    )
+    assert _resolve_dup_ids(reason, lookup) == "dup F63b1ad"
+
+
+def test_resolve_dup_ids_full_rule():
+    """Resolve full Semgrep rule_id in duplicate reason."""
+    lookup = {
+        ("python.flask.tainted-sql-string", 16): "Fabc123",
+        ("tainted-sql-string", 16): "Fabc123",
+    }
+    reason = (
+        "duplicate: already confirmed as "
+        "python.flask.tainted-sql-string at line 16"
+    )
+    assert _resolve_dup_ids(reason, lookup) == "dup Fabc123"
+
+
+def test_resolve_dup_ids_no_match_keeps_original():
+    """Non-matching reason passes through unchanged."""
+    reason = "not_exploitable: safe in this context"
+    assert _resolve_dup_ids(reason, {}) == reason
+
+
+def test_resolve_dup_ids_no_lookup_keeps_original():
+    """Duplicate reason without matching ID keeps original."""
+    reason = "duplicate: same issue as unknown.rule at line 99"
+    assert _resolve_dup_ids(reason, {}) == reason
 
 
 def _make_context(**overrides) -> GitHubContext:
@@ -1452,8 +1488,10 @@ class TestBuildConfirmedStructured:
         assert result[0]["agent_reason"] == (
             "SQL query built with string concatenation"
         )
-        assert "Review this finding" in result[0]["agent_recommendation"]
-        assert "HIGH" in result[0]["agent_recommendation"]
+        # Recommendation fallback: f.message (no f.fix available)
+        assert result[0]["agent_recommendation"] == (
+            "SQL query built with string concatenation"
+        )
 
     def test_safety_net_empty_message_no_reason(self):
         """Safety-net with empty message gets empty agent_reason."""
@@ -1487,6 +1525,37 @@ class TestBuildConfirmedStructured:
         result = engine._build_confirmed_structured(findings, analysis)
         assert result[0]["agent_reason"] == "specific agent analysis"
         assert result[0]["agent_recommendation"] == "use params"
+
+    def test_safety_net_uses_fix_field(self):
+        """Safety-net recommendation prefers f.fix over f.message."""
+        engine = DecisionEngine()
+        findings = [
+            _make_finding(Severity.HIGH, rule_id="cmd.inj",
+                          message="Unsafe subprocess call",
+                          fix="subprocess.run(['cmd', arg], check=True)"),
+        ]
+        analysis = {"confirmed": []}
+        warnings = [{"rule_id": "cmd.inj", "severity": "high"}]
+        result = engine._build_confirmed_structured(
+            findings, analysis, warnings,
+        )
+        assert "Semgrep autofix" in result[0]["agent_recommendation"]
+        assert "subprocess.run" in result[0]["agent_recommendation"]
+        assert result[0]["fix"] == (
+            "subprocess.run(['cmd', arg], check=True)"
+        )
+
+    def test_confirmed_structured_includes_fix(self):
+        """Structured findings include fix field from Finding."""
+        engine = DecisionEngine()
+        findings = [
+            _make_finding(Severity.HIGH, rule_id="sqli",
+                          fix="cursor.execute(q, (param,))"),
+        ]
+        analysis = {"confirmed": [{"rule_id": "sqli", "severity": "HIGH",
+                                    "reason": "real", "recommendation": "fix"}]}
+        result = engine._build_confirmed_structured(findings, analysis)
+        assert result[0]["fix"] == "cursor.execute(q, (param,))"
 
 
 # --- Structured findings on Decision ---
@@ -1644,7 +1713,7 @@ class TestTriageContextSummary:
         engine = DecisionEngine()
         engine._run_triage(_make_context())
         out = capsys.readouterr().out
-        assert "decision: appsec" in out
+        assert "Decision: APPSEC" in out
 
 
 # --- A4 + B3: Semgrep diagnostics + Agent findings table ---
@@ -1690,9 +1759,8 @@ class TestAnalyzerDiagnosticsPrint:
 
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
-            assert "Semgrep: 2 scan(s), 0 finding(s)" in out
-            assert "PR diff: 1 call(s)" in out
-            assert "Analysis: 0 analyzed" in out
+            assert "Semgrep: 0 raw" in out
+            assert "0 confirmed" in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -1738,17 +1806,9 @@ class TestAnalyzerDiagnosticsPrint:
 
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
-            assert "Analysis: 5 analyzed" in out
-            assert "2 vulnerabilities confirmed," in out
+            # Condensed summary (per-finding details in table)
+            assert "2 confirmed" in out
             assert "1 dismissed" in out
-            # Agent reasoning (short rule, with severity)
-            assert "Confirmed:" in out
-            assert "[HIGH] r1: SQL injection found" in out
-            assert "[MEDIUM] r2: Path traversal" in out
-            assert "Dismissed:" in out
-            assert "r3: false positive" in out
-            # Tool stats printed BEFORE analysis
-            assert out.index("Semgrep:") < out.index("Analysis:")
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -1794,12 +1854,9 @@ class TestAnalyzerDiagnosticsPrint:
 
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
-            assert "Confirmed:" in out
-            assert "[HIGH] sql-injection: User input in SQL query" in out
-            assert "Dismissed:" in out
-            assert "noise-rule:" in out
-            # Long reason truncated at word boundary
-            assert "..." in out
+            # Condensed summary (per-finding details in table)
+            assert "1 confirmed" in out
+            assert "1 dismissed" in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -1851,10 +1908,9 @@ class TestAnalyzerDiagnosticsPrint:
 
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
-            # Short rule name visible in reason
-            assert "see sqli at line 16" in out
-            # Full rule path NOT visible
-            assert "python.flask.injection.sqli at line" not in out
+            # Condensed summary (rule shortening tested in table tests)
+            assert "1 confirmed" in out
+            assert "1 dismissed" in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -1896,9 +1952,9 @@ class TestAnalyzerDiagnosticsPrint:
 
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
-            assert "Confirmed:" in out
-            assert "[MEDIUM] xss: Reflected XSS" in out
-            assert "Dismissed:" not in out
+            # Condensed summary
+            assert "1 confirmed" in out
+            assert "0 dismissed" in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -1989,12 +2045,9 @@ class TestAnalyzerDiagnosticsPrint:
 
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
-            # ERROR mapped to HIGH, WARNING mapped to MEDIUM
-            assert "[HIGH] sql-injection:" in out
-            assert "[MEDIUM] xss-check:" in out
-            # Must NOT contain [ERROR] or [WARNING] (GitHub Actions misreads)
-            assert "[ERROR]" not in out
-            assert "[WARNING]" not in out
+            # Condensed summary (severity normalization tested in table)
+            assert "1 confirmed" in out
+            assert "1 dismissed" in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -2038,10 +2091,9 @@ class TestAnalyzerDiagnosticsPrint:
 
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
-            # Agent findings table was moved to Smart Gate (_apply_gate)
-            # _run_analyzer now only shows essential diagnostics
-            assert "Semgrep: 1 scan(s)" in out
-            assert "WARNING: Semgrep ran but found 0 findings" in out
+            # Condensed summary with emoji
+            assert "Semgrep: 0 raw" in out
+            assert "2 confirmed" in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -2351,11 +2403,12 @@ class TestSmartGateSummaryPrint:
             _make_context(mode=mode), _make_triage(), [tr], analysis,
         )
 
-    def test_mode_always_printed(self, capsys):
-        """Mode is always printed in the gate summary."""
+    def test_gate_verdict_always_printed(self, capsys):
+        """Gate verdict box is always printed."""
         self._gate([], _empty_analysis(), mode="shadow")
         out = capsys.readouterr().out
-        assert "Mode: shadow" in out
+        assert "GATE DECISION" in out
+        assert "ALLOWED" in out
 
     def test_no_warning_when_clean(self, capsys):
         """No warning when both scanner and agent find nothing."""
@@ -2399,8 +2452,9 @@ class TestSmartGateSummaryPrint:
         }
         self._gate(raw, analysis, mode="enforce")
         out = capsys.readouterr().out
-        assert "Gate: 2 finding(s)" in out
-        assert "1 across 1 vulnerabilities + 1 safety-net" in out
+        assert "MANUAL REVIEW REQUIRED" in out
+        assert "2 confirmed finding(s)" in out
+        assert "safety warning(s)" in out
 
     def test_findings_table_printed(self, capsys):
         """Findings table printed with all raw findings and verdicts."""
@@ -2427,11 +2481,11 @@ class TestSmartGateSummaryPrint:
         }
         self._gate(raw, analysis, mode="shadow")
         out = capsys.readouterr().out
-        assert "Findings table" in out
+        # Box-drawing table with verdicts
+        assert "┌" in out
         assert "injection" in out
         assert "confirmed" in out
         assert "dismissed" in out
-        assert "Summary:" in out
 
     def test_noise_shows_semgrep_message(self, capsys):
         """Noise findings show Semgrep message as fallback reason."""
@@ -2450,8 +2504,8 @@ class TestSmartGateSummaryPrint:
         out = capsys.readouterr().out
         assert "not analyzed by agent" in out
 
-    def test_table_reason_not_truncated(self, capsys):
-        """Full reasons appear in the findings table (no 80-char cut)."""
+    def test_table_reason_truncated_for_box(self, capsys):
+        """CI box-drawing table truncates reasons (full in PR)."""
         long_reason = (
             "SQL injection via f-string where user_email from request "
             "flows into cursor.execute without parameterization, "
@@ -2470,8 +2524,10 @@ class TestSmartGateSummaryPrint:
         }
         self._gate(raw, analysis, mode="shadow")
         out = capsys.readouterr().out
-        # "parameterization" is past 80 chars — must appear untruncated
-        assert "parameterization" in out
+        # "f-string" is within truncation — appears in output
+        assert "f-string" in out
+        # "user_email" is past truncation — truncated away
+        assert "user_email" not in out
 
     def test_dismissed_shows_agent_reason(self, capsys):
         """Dismissed findings show agent's dismissal reason in table."""
@@ -2558,6 +2614,61 @@ class TestSmartGateSummaryPrint:
         out = capsys.readouterr().out
         assert "safety-net" in out
         assert "Test finding" in out
+
+    def test_ci_table_has_finding_id(self, capsys):
+        """CI table includes finding ID as first column."""
+        raw = [_make_finding(Severity.HIGH, rule_id="sqli.rule",
+                             path="app.py", line=42)]
+        analysis = {
+            "confirmed": [{"rule_id": "sqli.rule", "severity": "HIGH",
+                           "reason": "SQL injection"}],
+            "dismissed": [],
+            "findings_analyzed": 1,
+            "summary": "found",
+            "rulesets_used": [], "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        self._gate(raw, analysis, mode="shadow")
+        out = capsys.readouterr().out
+        # Finding ID in table header and rows
+        assert "ID" in out
+        fid = raw[0].finding_id
+        assert fid in out
+
+    def test_ci_table_resolves_dup_ids(self, capsys):
+        """CI table resolves duplicate dismissed to 'dup Fxxxxxx'."""
+        confirmed = _make_finding(
+            Severity.HIGH,
+            rule_id="python.flask.tainted-sql-string",
+            path="app.py", line=16,
+        )
+        dismissed = _make_finding(
+            Severity.MEDIUM,
+            rule_id="python.audit.raw-html-format",
+            path="app.py", line=16,
+        )
+        raw = [confirmed, dismissed]
+        analysis = {
+            "confirmed": [
+                {"rule_id": "python.flask.tainted-sql-string",
+                 "severity": "HIGH", "reason": "SQL injection"},
+            ],
+            "dismissed": [
+                {"rule_id": "python.audit.raw-html-format",
+                 "severity": "MEDIUM",
+                 "reason": (
+                     "duplicate: already confirmed as "
+                     "python.flask.tainted-sql-string at line 16"
+                 )},
+            ],
+            "findings_analyzed": 2,
+            "summary": "found",
+            "rulesets_used": [], "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        self._gate(raw, analysis, mode="shadow")
+        out = capsys.readouterr().out
+        assert f"dup {confirmed.finding_id}" in out
 
     def test_shadow_reason_has_severity_breakdown(self, capsys):
         """Shadow mode reason includes severity breakdown."""
@@ -2673,5 +2784,6 @@ class TestSmartGateSummaryPrint:
         }
         self._gate(raw, analysis, mode="shadow")
         out = capsys.readouterr().out
-        assert "Gate: 1 finding(s)" in out
-        assert "1 across 1 vulnerabilities + 0 safety-net" in out
+        # Boxed gate verdict with finding count
+        assert "GATE DECISION" in out
+        assert "1 confirmed finding(s)" in out

@@ -436,6 +436,7 @@ def parse_semgrep_findings(raw_json: str) -> list[Finding]:
             line=r.get("start", {}).get("line", 0),
             severity=severity,
             message=r.get("extra", {}).get("message", ""),
+            fix=r.get("extra", {}).get("fix", ""),
         ))
     return findings
 

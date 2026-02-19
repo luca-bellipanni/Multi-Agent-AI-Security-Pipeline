@@ -45,16 +45,19 @@ def _make_semgrep_json(findings=None):
     """Create a mock Semgrep JSON output string."""
     results = []
     for f in (findings or []):
+        extra = {
+            "severity": f.get("severity", "WARNING"),
+            "message": f.get("message", "Test message"),
+            "metadata": {},
+        }
+        if f.get("fix"):
+            extra["fix"] = f["fix"]
         results.append({
             "check_id": f.get("rule_id", "test.rule"),
             "path": f.get("path", "test.py"),
             "start": {"line": f.get("line", 1), "col": 1, "offset": 0},
             "end": {"line": f.get("line", 1), "col": 10, "offset": 10},
-            "extra": {
-                "severity": f.get("severity", "WARNING"),
-                "message": f.get("message", "Test message"),
-                "metadata": {},
-            },
+            "extra": extra,
         })
     return json.dumps({"results": results, "errors": []})
 
@@ -385,6 +388,25 @@ class TestParseSemgrepFindings:
         ])
         findings = parse_semgrep_findings(raw)
         assert len(findings) == 3
+
+    def test_fix_field_parsed(self):
+        """Semgrep extra.fix field is captured in Finding."""
+        raw = _make_semgrep_json([{
+            "rule_id": "cmd.inj",
+            "severity": "ERROR",
+            "fix": "subprocess.run(['cmd', arg], check=True)",
+        }])
+        findings = parse_semgrep_findings(raw)
+        assert findings[0].fix == "subprocess.run(['cmd', arg], check=True)"
+
+    def test_fix_field_empty_when_absent(self):
+        """Findings without Semgrep fix have empty fix field."""
+        raw = _make_semgrep_json([{
+            "rule_id": "sqli",
+            "severity": "WARNING",
+        }])
+        findings = parse_semgrep_findings(raw)
+        assert findings[0].fix == ""
 
 
 # --- Semgrep: format findings ---

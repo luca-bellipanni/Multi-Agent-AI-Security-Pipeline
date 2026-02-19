@@ -115,8 +115,8 @@ class TestResolveDuplicateRefs:
             "python.flask.tainted-sql-string at line 16"
         )
         result = _resolve_duplicate_refs(reason, lookup)
-        assert "see F63b1ad" in result
-        assert "python.flask" not in result
+        # Duplicate reasons are fully replaced with "dup Fxxxxxx"
+        assert result == "dup F63b1ad"
 
     def test_no_match_keeps_original(self):
         reason = "duplicate: same issue covered by rule unknown.rule at line 99"
@@ -127,6 +127,36 @@ class TestResolveDuplicateRefs:
         reason = "not_exploitable: safe in this context"
         result = _resolve_duplicate_refs(reason, {})
         assert result == reason
+
+    def test_resolves_confirmed_as_pattern(self):
+        """Resolve 'confirmed as rule at line Y' agent format."""
+        lookup = {("tainted-sql-string", 16): "F63b1ad"}
+        reason = (
+            "duplicate: same SQL injection already confirmed as "
+            "tainted-sql-string at line 16"
+        )
+        assert _resolve_duplicate_refs(reason, lookup) == "dup F63b1ad"
+
+    def test_resolves_full_rule_confirmed_as(self):
+        """Resolve full Semgrep rule_id in 'confirmed as' pattern."""
+        lookup = {
+            ("python.flask.tainted-sql-string", 16): "Fabc123",
+            ("tainted-sql-string", 16): "Fabc123",
+        }
+        reason = (
+            "duplicate: already confirmed as "
+            "python.flask.tainted-sql-string at line 16"
+        )
+        assert _resolve_duplicate_refs(reason, lookup) == "dup Fabc123"
+
+    def test_non_duplicate_rule_ref_uses_see(self):
+        """Non-duplicate reasons use 'see Fxxxxxx' for rule refs."""
+        lookup = {("tainted-sql-string", 16): "F63b1ad"}
+        reason = (
+            "not_exploitable: see rule tainted-sql-string at line 16"
+        )
+        result = _resolve_duplicate_refs(reason, lookup)
+        assert "see F63b1ad" in result
 
 
 # --- format_comment ---
@@ -159,18 +189,18 @@ class TestFormatComment:
         assert "`run_semgrep` x2" in body
 
     def test_findings_table_short_rule(self):
-        """Findings table uses short rule IDs."""
+        """Findings table uses short rule IDs and unified format."""
         d = _make_decision()
         body = format_comment(d)
-        assert "### Findings (1)" in body
+        assert "### Findings" in body
         assert "Fabc123" in body
         assert "HIGH" in body
         # Short rule (not full path)
         assert "`sql-injection`" in body
-        assert "`src/db.py`" in body
-        assert "42" in body
-        assert "Source" in body
-        assert "agent" in body
+        # File:Line combined column
+        assert "src/db.py:42" in body
+        assert "Verdict" in body
+        assert "confirmed" in body
 
     def test_findings_table_strips_workspace(self):
         """Workspace prefix stripped from paths."""
@@ -185,7 +215,7 @@ class TestFormatComment:
             "agent_recommendation": "",
         }])
         body = format_comment(d)
-        assert "`app.py`" in body
+        assert "app.py:10" in body
         assert "/github/workspace" not in body
 
     def test_details_has_finding_id(self):
@@ -289,16 +319,17 @@ class TestFormatComment:
         body = format_comment(d)
         assert "Auto-excepted" not in body
 
-    def test_dismissed_with_finding_ids(self):
-        """Dismissed findings show finding IDs and short rule names."""
+    def test_dismissed_in_unified_table(self):
+        """Dismissed findings appear in the unified table with IDs."""
         d = _make_decision(dismissed_findings=[
             {"rule_id": "python.test.rule", "path": "a.py",
-             "line": 10, "reason": "test file"},
+             "line": 10, "reason": "test file", "severity": "medium"},
             {"rule_id": "python.noise.rule", "path": "b.py",
-             "line": 20, "reason": "false positive"},
+             "line": 20, "reason": "false positive", "severity": "low"},
         ])
         body = format_comment(d)
-        assert "Dismissed by agent (2)" in body
+        # Dismissed in unified table (not separate section)
+        assert "dismissed" in body
         # Short rule names
         assert "`rule`" in body
         # Finding IDs computed
@@ -324,6 +355,7 @@ class TestFormatComment:
                 "rule_id": "python.other.rule",
                 "path": "app.py",
                 "line": 12,
+                "severity": "medium",
                 "reason": (
                     "duplicate: same issue covered by rule "
                     "python.flask.tainted-sql-string at line 16"
@@ -331,16 +363,54 @@ class TestFormatComment:
             }],
         )
         body = format_comment(d)
-        assert "see F63b1ad" in body
+        assert "dup F63b1ad" in body
 
     def test_dismissed_no_path_fallback(self):
-        """Dismissed without path/line shows just rule and reason."""
+        """Dismissed without path/line shows in table with ? fallbacks."""
         d = _make_decision(dismissed_findings=[
             {"rule_id": "test.rule", "reason": "test file"},
         ])
         body = format_comment(d)
-        assert "Dismissed by agent (1)" in body
+        assert "dismissed" in body
         assert "`rule`" in body
+        assert "test file" in body
+
+    def test_unified_table_has_verdict_and_reason(self):
+        """Unified table includes Verdict and Reason columns."""
+        d = _make_decision(
+            confirmed_findings=[{
+                "finding_id": "Fabc123",
+                "rule_id": "sqli",
+                "path": "app.py",
+                "line": 10,
+                "severity": "high",
+                "message": "SQL injection",
+                "agent_reason": "Attacker controls input",
+                "agent_recommendation": "Use parameterized queries",
+                "source": "confirmed",
+            }],
+            dismissed_findings=[{
+                "rule_id": "noise.rule",
+                "path": "app.py",
+                "line": 20,
+                "severity": "low",
+                "reason": "test_file: test helper uses mock",
+            }],
+        )
+        body = format_comment(d)
+        # Unified table headers
+        assert "Verdict" in body
+        assert "Reason" in body
+        # Confirmed in table
+        assert "confirmed" in body
+        assert "Attacker controls input" in body
+        # Dismissed in table (not separate section)
+        assert "dismissed" in body
+        assert "test_file: test helper uses mock" in body
+        # No separate "Dismissed by agent" section
+        assert "Dismissed by agent" not in body
+        # Total count includes both
+        assert "### Findings (2)" in body
 
     def test_no_dismissed_no_section(self):
         d = _make_decision(dismissed_findings=[])

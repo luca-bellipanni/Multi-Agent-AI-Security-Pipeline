@@ -121,14 +121,14 @@ def make_step_logger(
             if total > 0:
                 tok_str = f" | {total / 1000:.1f}k tok"
 
-        print(f"  [{agent_name}] Step {step_num}/{max_steps} "
-              f"({duration:.1f}s) — {tools_str}{tok_str}")
+        print(f"  ├─ Step {step_num}/{max_steps}  ✓  "
+              f"{tools_str:<50s}{duration:>6.1f}s{tok_str}")
 
         # Timeout check
         if max_seconds is not None and elapsed > max_seconds:
             if agent:
                 agent.interrupt_switch = True
-            print(f"  [{agent_name}] TIMEOUT after {elapsed:.0f}s "
+            print(f"  └─ [{agent_name}] TIMEOUT after {elapsed:.0f}s "
                   f"(limit: {max_seconds:.0f}s)")
 
     return callback
@@ -185,7 +185,7 @@ def run_with_timeout(
         if thread.is_alive():
             elapsed = time.monotonic() - start
             if elapsed < max_seconds:
-                print(f"  [{agent_name}] Still running... ({elapsed:.0f}s)")
+                print(f"  │  [{agent_name}] Still running... ({elapsed:.0f}s)")
 
     if thread.is_alive():
         # Hard timeout — try graceful shutdown
@@ -193,7 +193,7 @@ def run_with_timeout(
             agent.interrupt_switch = True
         elapsed = time.monotonic() - start
         print(
-            f"  [{agent_name}] HARD TIMEOUT — "
+            f"  └─ [{agent_name}] HARD TIMEOUT — "
             f"{elapsed:.0f}s elapsed (limit: {max_seconds:.0f}s)"
         )
         # Grace period: let the agent finish current step

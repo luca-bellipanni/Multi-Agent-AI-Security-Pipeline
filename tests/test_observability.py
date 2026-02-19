@@ -28,7 +28,8 @@ class TestMakeStepLogger:
         mock_agent = Mock(max_steps=3)
         callback(mock_step, agent=mock_agent)
         output = capsys.readouterr().out
-        assert "[Test] Step 1/3" in output
+        assert "Step 1/3" in output
+        assert "✓" in output
         assert "2.5s" in output
         assert "run_semgrep" in output
 
@@ -65,7 +66,7 @@ class TestMakeStepLogger:
         callback = make_step_logger("Test")
         callback(object(), agent=None)
         output = capsys.readouterr().out
-        assert "[Test]" in output
+        assert "├─ Step" in output
 
     def test_no_agent_kwarg_no_crash(self, capsys):
         """Works when agent kwarg is missing."""
@@ -78,7 +79,7 @@ class TestMakeStepLogger:
         )
         callback(mock_step)
         output = capsys.readouterr().out
-        assert "[Test] Step 1/?" in output
+        assert "Step 1/?" in output
 
     def test_token_display_format(self, capsys):
         """Token count shown as 'Xk tok'."""
@@ -144,14 +145,14 @@ class TestMakeStepLogger:
         assert "limit: 0s" in output
         assert "[MyAgent]" in output
 
-    def test_agent_name_in_output(self, capsys):
-        """Agent name label appears in output."""
-        callback = make_step_logger("Triage")
+    def test_agent_name_in_timeout(self, capsys):
+        """Agent name label appears in timeout message."""
+        callback = make_step_logger("Triage", max_seconds=0)
         mock_step = Mock(
             step_number=1, timing=None,
             tool_calls=None, token_usage=None,
         )
-        callback(mock_step, agent=Mock(max_steps=3))
+        callback(mock_step, agent=Mock(max_steps=3, interrupt_switch=False))
         assert "[Triage]" in capsys.readouterr().out
 
     def test_timing_none_shows_zero(self, capsys):

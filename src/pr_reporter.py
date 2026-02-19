@@ -42,19 +42,33 @@ def _compute_finding_id(rule_id: str, path: str, line: int) -> str:
 def _resolve_duplicate_refs(
     reason: str, id_lookup: dict[tuple[str, int], str],
 ) -> str:
-    """Replace rule_id+line refs in reason with finding IDs.
+    """Replace duplicate references with finding IDs.
 
-    Example: "duplicate: same issue covered by rule python.x.y at line 16"
-    → "duplicate: see F63b1ad"
+    If reason starts with 'duplicate:', extract rule+line and replace
+    entire reason with 'dup Fxxxxxx'.
+    For other patterns, replace 'rule X at line Y' with 'see Fxxxxxx'.
     """
-    # Match "rule <rule_id> at line <N>" or "rule <rule_id> at <path>:<N>"
+    # Special case: duplicate reasons → replace entire reason
+    if reason.strip().lower().startswith("duplicate"):
+        m = re.search(
+            r'([\w][\w.-]+)\s+at\s+(?:line\s+)?(?:\S+:)?(\d+)',
+            reason,
+        )
+        if m:
+            ref_rule = m.group(1)
+            ref_line = int(m.group(2))
+            short = _short_rule(ref_rule)
+            fid = (id_lookup.get((ref_rule, ref_line))
+                   or id_lookup.get((short, ref_line)))
+            if fid:
+                return f"dup {fid}"
+
+    # General case: replace "rule X at line Y" with "see Fxxxxxx"
     def _replacer(m: re.Match) -> str:
         ref_rule = m.group(1)
         ref_line = int(m.group(2))
-        # Try full rule_id
         fid = id_lookup.get((ref_rule, ref_line))
         if not fid:
-            # Try short rule name
             short = _short_rule(ref_rule)
             fid = id_lookup.get((short, ref_line))
         if fid:
@@ -110,58 +124,98 @@ def format_comment(decision: Decision) -> str:
             _id_lookup[(rule, line)] = fid
             _id_lookup[(_short_rule(rule), line)] = fid
 
-    # Findings table (confirmed + safety-net, unified)
-    if decision.confirmed_findings:
-        lines.append(
-            f"### Findings ({len(decision.confirmed_findings)})"
-        )
+    # Unified findings table (confirmed + safety-net + dismissed)
+    all_rows: list[dict] = []
+    for f in decision.confirmed_findings:
+        source = f.get("source", "confirmed")
+        reason = f.get("agent_reason", "")
+        if not reason and source == "safety-net":
+            reason = f.get("message", "") or (
+                "Flagged by safety net "
+                "(agent did not confirm this finding)"
+            )
+        all_rows.append({
+            "fid": f.get("finding_id", "?"),
+            "sev": f.get("severity", "?").upper(),
+            "rule": f.get("rule_id", "?"),
+            "path": f.get("path", "?"),
+            "line": f.get("line", "?"),
+            "verdict": "safety-net" if source == "safety-net"
+                       else "confirmed",
+            "reason": reason,
+        })
+    for d in decision.dismissed_findings:
+        rule_id = d.get("rule_id", "?")
+        path = d.get("path", "")
+        line_num = d.get("line", 0)
+        reason = d.get("reason", "no reason")
+        if path and line_num:
+            fid = _compute_finding_id(rule_id, path, line_num)
+            reason = _resolve_duplicate_refs(reason, _id_lookup)
+        else:
+            fid = "?"
+        all_rows.append({
+            "fid": fid,
+            "sev": d.get("severity", "?").upper(),
+            "rule": rule_id,
+            "path": path or "?",
+            "line": line_num or "?",
+            "verdict": "dismissed",
+            "reason": reason,
+        })
+
+    if all_rows:
+        lines.append(f"### Findings ({len(all_rows)})")
         lines.append("")
-        lines.append("| ID | Sev | Rule | File | Line | Source |")
-        lines.append("|----|-----|------|------|------|--------|")
-        for f in decision.confirmed_findings:
-            fid = f.get("finding_id", "?")
-            sev = f.get("severity", "?").upper()
-            rule = f"`{_short_rule(f.get('rule_id', '?'))}`"
-            path = f"`{_short_path(f.get('path', '?'))}`"
-            line = f.get("line", "?")
-            source = f.get("source", "confirmed")
-            src_label = ("agent" if source == "confirmed"
-                         else "safety-net")
+        lines.append(
+            "| ID | Sev | Rule | File:Line | Verdict | Reason |"
+        )
+        lines.append(
+            "|----|-----|------|-----------|---------|--------|"
+        )
+        for r in all_rows:
+            rule = f"`{_short_rule(r['rule'])}`"
+            path = _short_path(r["path"])
+            loc = f"`{path}:{r['line']}`"
             lines.append(
-                f"| {fid} | {sev} | {rule} | {path} | {line} "
-                f"| {src_label} |"
+                f"| {r['fid']} | {r['sev']} | {rule} | {loc} "
+                f"| {r['verdict']} | {r['reason']} |"
             )
         lines.append("")
 
-        # Details (collapsible) — with finding ID
-        lines.append("<details><summary>Details</summary>")
-        lines.append("")
-        for f in decision.confirmed_findings:
-            fid = f.get("finding_id", "?")
-            sev = f.get("severity", "?").upper()
-            rule = _short_rule(f.get("rule_id", "?"))
-            path = _short_path(f.get("path", "?"))
-            line = f.get("line", "?")
-            lines.append(
-                f"**{fid}** [{sev}] `{rule}` at `{path}:{line}`"
-            )
-            reason = f.get("agent_reason", "")
-            source = f.get("source", "confirmed")
-            if not reason and source == "safety-net":
-                semgrep_msg = f.get("message", "")
-                if semgrep_msg:
-                    reason = semgrep_msg
-                else:
-                    reason = ("Flagged by safety net "
-                              "(agent did not confirm this finding)")
-            if reason:
-                lines.append(f"- Analysis: {reason}")
-            rec = f.get("agent_recommendation", "")
-            if rec:
-                lines.append(f"- Fix: {rec}")
+        # Details (collapsible) — confirmed + safety-net only
+        confirmed_rows = [
+            r for r in all_rows if r["verdict"] != "dismissed"
+        ]
+        if confirmed_rows:
+            lines.append("<details><summary>Details</summary>")
             lines.append("")
-        lines.append("</details>")
-        lines.append("")
+            for f in decision.confirmed_findings:
+                fid = f.get("finding_id", "?")
+                sev = f.get("severity", "?").upper()
+                rule = _short_rule(f.get("rule_id", "?"))
+                path = _short_path(f.get("path", "?"))
+                line = f.get("line", "?")
+                lines.append(
+                    f"**{fid}** [{sev}] `{rule}` at `{path}:{line}`"
+                )
+                reason = f.get("agent_reason", "")
+                source = f.get("source", "confirmed")
+                if not reason and source == "safety-net":
+                    semgrep_msg = f.get("message", "")
+                    if semgrep_msg:
+                        reason = semgrep_msg
+                    else:
+                        reason = ("Flagged by safety net "
+                                  "(agent did not confirm this finding)")
+                if reason:
+                    lines.append(f"- Analysis: {reason}")
+                rec = f.get("agent_recommendation", "")
+                if rec:
+                    lines.append(f"- Fix: {rec}")
+                lines.append("")
+            lines.append("</details>")
+            lines.append("")
 
         # Safety-net explanation (brief note under table)
         safety_count = sum(
@@ -193,31 +247,6 @@ def format_comment(decision: Decision) -> str:
             lines.append(
                 f"- [{sev}] `{rule}` at `{path}:{line}` — {reason}"
             )
-        lines.append("")
-        lines.append("</details>")
-        lines.append("")
-
-    # Dismissed findings (collapsible) — with finding IDs
-    if decision.dismissed_findings:
-        n = len(decision.dismissed_findings)
-        lines.append(
-            f"<details><summary>Dismissed by agent ({n})</summary>"
-        )
-        lines.append("")
-        for d in decision.dismissed_findings:
-            rule_id = d.get("rule_id", "?")
-            short = _short_rule(rule_id)
-            path = d.get("path", "")
-            line_num = d.get("line", 0)
-            reason = d.get("reason", "no reason")
-            # Compute finding ID for cross-reference
-            if path and line_num:
-                fid = _compute_finding_id(rule_id, path, line_num)
-                # Resolve duplicate references to finding IDs
-                resolved = _resolve_duplicate_refs(reason, _id_lookup)
-                lines.append(f"- {fid} `{short}` — {resolved}")
-            else:
-                lines.append(f"- `{short}` — {reason}")
         lines.append("")
         lines.append("</details>")
         lines.append("")
