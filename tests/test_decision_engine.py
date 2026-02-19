@@ -1583,6 +1583,52 @@ class TestAnalyzerDiagnosticsPrint:
             out = capsys.readouterr().out
             assert "Semgrep: 2 scan(s), 0 finding(s)" in out
             assert "PR diff: 1 call(s)" in out
+            assert "Analysis: 0 analyzed" in out
+
+    @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
+    @patch("src.analyzer_agent.run_analyzer")
+    @patch("src.analyzer_agent.create_analyzer_agent")
+    def test_analysis_breakdown_printed(self, mock_agent, mock_run, capsys):
+        """Prints agent analysis breakdown (confirmed/dismissed counts)."""
+        mock_run.return_value = {
+            "confirmed": [
+                {"rule_id": "r1", "severity": "HIGH"},
+                {"rule_id": "r2", "severity": "MEDIUM"},
+            ],
+            "dismissed": [
+                {"rule_id": "r3", "reason": "false positive"},
+            ],
+            "summary": "Found issues",
+            "findings_analyzed": 5,
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        engine = DecisionEngine()
+        triage = _make_triage()
+        ctx = _make_context()
+
+        with patch("src.tools.SemgrepTool") as MockSemgrep, \
+             patch("src.tools.FetchPRDiffTool") as MockDiff:
+            mock_st = MagicMock()
+            mock_st._call_count = 1
+            mock_st._all_raw_findings = []
+            mock_st._all_scan_errors = []
+            mock_st._all_configs_used = []
+            mock_st._last_cmd = []
+            mock_st._last_files_scanned = []
+            mock_st._last_stderr = ""
+            mock_st.workspace_path = "/test/workspace"
+            MockSemgrep.return_value = mock_st
+
+            mock_dt = MagicMock()
+            mock_dt._call_count = 0
+            MockDiff.return_value = mock_dt
+
+            engine._run_analyzer(ctx, triage)
+            out = capsys.readouterr().out
+            assert "Analysis: 5 analyzed" in out
+            assert "2 confirmed, 1 dismissed" in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")

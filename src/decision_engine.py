@@ -278,6 +278,13 @@ class DecisionEngine:
             )
             print(f"AppSec Agent complete: {analysis.get('summary', 'N/A')}")
 
+            # Agent analysis breakdown
+            n_confirmed = len(analysis.get("confirmed", []))
+            n_dismissed = len(analysis.get("dismissed", []))
+            n_analyzed = analysis.get("findings_analyzed", 0)
+            print(f"  Analysis: {n_analyzed} analyzed"
+                  f" → {n_confirmed} confirmed, {n_dismissed} dismissed")
+
             # Essential diagnostics (always shown)
             print(f"  Semgrep: {semgrep_tool._call_count} scan(s), "
                   f"{len(semgrep_tool._all_raw_findings)} finding(s)")

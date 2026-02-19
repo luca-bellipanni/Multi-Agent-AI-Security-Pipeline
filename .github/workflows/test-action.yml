@@ -13,12 +13,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Agentic AppSec (shadow mode)
+      - name: Run Agentic AppSec (enforce mode)
         id: appsec
         uses: ./
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          mode: shadow
+          mode: enforce
           ai_api_key: ${{ secrets.AI_API_KEY }}
           ai_model: gemini/gemini-2.0-flash
 
