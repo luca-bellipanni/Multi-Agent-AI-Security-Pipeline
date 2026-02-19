@@ -181,16 +181,37 @@ class TestExtractStepDescription:
         )
         assert _extract_step_description(step) == "I need to scan the codebase"
 
-    def test_thought_truncated_to_80_chars(self):
-        """Long thoughts truncated to 80 characters."""
+    def test_long_thought_truncated_at_word_boundary(self):
+        """Long thoughts without period truncated at word boundary ≤120 chars."""
         from src.observability import _extract_step_description
-        long_thought = "A" * 120
+        # Words separated by spaces, total > 120 chars
+        long_thought = "I am analyzing " + "the security vulnerabilities " * 5
         step = SimpleNamespace(
             model_output=f"Thought: {long_thought}",
             tool_calls=None,
         )
         result = _extract_step_description(step)
-        assert len(result) == 80
+        assert result.endswith("...")
+        assert len(result) <= 124  # 120 + "..."
+
+    def test_thought_first_sentence_extracted(self):
+        """Thought with period: only first sentence returned."""
+        from src.observability import _extract_step_description
+        step = SimpleNamespace(
+            model_output="Thought: I found SQL injection. Let me also check XSS.",
+            tool_calls=None,
+        )
+        assert _extract_step_description(step) == "I found SQL injection."
+
+    def test_thought_ending_with_colon_skipped(self):
+        """Intro-only thoughts (ending with ':') are skipped."""
+        from src.observability import _extract_step_description
+        step = SimpleNamespace(
+            model_output="Thought: Here's what I observed:\nCode:\nx = 1",
+            tool_calls=None,
+        )
+        # Colon-ending thought skipped → falls through to fallback
+        assert _extract_step_description(step) == "(reasoning)"
 
     def test_tool_name_from_code_arguments(self):
         """Falls back to tool name mapping from code arguments."""

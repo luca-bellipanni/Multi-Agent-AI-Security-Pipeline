@@ -1556,7 +1556,7 @@ class TestAnalyzerDiagnosticsPrint:
             engine._run_analyzer(ctx, triage)
             out = capsys.readouterr().out
             assert "Semgrep: 2 scan(s), 0 finding(s)" in out
-            assert "Diff: 1 call(s)" in out
+            assert "PR diff: 1 call(s)" in out
 
     @patch.dict("os.environ", {"INPUT_AI_API_KEY": "k", "INPUT_AI_MODEL": "m"})
     @patch("src.analyzer_agent.run_analyzer")
@@ -1957,31 +1957,20 @@ class TestSmartGateSummaryPrint:
             _make_context(mode=mode), _make_triage(), [tr], analysis,
         )
 
-    def test_scanner_count_always_printed(self, capsys):
-        """Scanner raw count is always printed."""
-        raw = [_make_finding(Severity.HIGH, rule_id="r1")]
-        self._gate(raw, _empty_analysis(), mode="shadow")
+    def test_mode_always_printed(self, capsys):
+        """Mode is always printed in the gate summary."""
+        self._gate([], _empty_analysis(), mode="shadow")
         out = capsys.readouterr().out
-        assert "Scanner: 1 raw finding(s)" in out
+        assert "Mode: shadow" in out
 
-    def test_agent_confirmed_printed(self, capsys):
-        """Agent confirmed count printed when agent has confirmations."""
-        raw = [_make_finding(Severity.HIGH, rule_id="r1")]
-        analysis = {
-            "confirmed": [{"rule_id": "r1", "severity": "HIGH"}],
-            "dismissed": [],
-            "findings_analyzed": 1,
-            "summary": "found",
-            "rulesets_used": [],
-            "rulesets_rationale": "",
-            "risk_assessment": "",
-        }
-        self._gate(raw, analysis, mode="enforce")
+    def test_no_warning_when_clean(self, capsys):
+        """No warning when both scanner and agent find nothing."""
+        self._gate([], _empty_analysis(), mode="shadow")
         out = capsys.readouterr().out
-        assert "Agent: 1 finding(s) confirmed" in out
+        assert "Warning:" not in out
 
-    def test_warning_when_agent_finds_but_scanner_empty(self, capsys):
-        """Warning printed when agent confirmed > 0 but validated == 0."""
+    def test_hallucination_warning_printed(self, capsys):
+        """Warning printed when agent confirmed but none matched scanner."""
         analysis = {
             "confirmed": [
                 {"rule_id": "ghost1", "severity": "HIGH"},
@@ -1996,53 +1985,11 @@ class TestSmartGateSummaryPrint:
         }
         self._gate([], analysis, mode="shadow")
         out = capsys.readouterr().out
-        assert "Scanner: 0 raw finding(s)" in out
-        assert "Warning: 2 agent finding(s) not confirmed by scanner" in out
+        assert "agent confirmed 2 finding(s)" in out
+        assert "none matched scanner results" in out
 
-    def test_mode_always_printed(self, capsys):
-        """Mode is always printed in the gate summary."""
-        self._gate([], _empty_analysis(), mode="shadow")
-        out = capsys.readouterr().out
-        assert "Mode: shadow" in out
-
-    def test_no_agent_line_when_no_confirmed(self, capsys):
-        """Agent line is NOT printed when no confirmations."""
-        self._gate([], _empty_analysis(), mode="enforce")
-        out = capsys.readouterr().out
-        assert "Agent:" not in out
-
-    def test_zero_raw_zero_agent_no_warning(self, capsys):
-        """No warning when both scanner and agent find nothing."""
-        self._gate([], _empty_analysis(), mode="shadow")
-        out = capsys.readouterr().out
-        assert "Warning:" not in out
-
-    def test_rule_expansion_wording(self, capsys):
-        """When rules expand to more raw matches, wording clarifies."""
-        # 2 raw findings with same rule_id
-        raw = [
-            _make_finding(Severity.HIGH, rule_id="sql-injection",
-                          path="a.py", line=10),
-            _make_finding(Severity.HIGH, rule_id="sql-injection",
-                          path="a.py", line=20),
-        ]
-        analysis = {
-            "confirmed": [{"rule_id": "sql-injection", "severity": "HIGH"}],
-            "dismissed": [],
-            "findings_analyzed": 1,
-            "summary": "found",
-            "rulesets_used": [],
-            "rulesets_rationale": "",
-            "risk_assessment": "",
-        }
-        self._gate(raw, analysis, mode="enforce")
-        out = capsys.readouterr().out
-        # 1 rule → 2 raw matches
-        assert "1 rule(s) confirmed" in out
-        assert "2 raw match(es)" in out
-
-    def test_safety_net_count_printed(self, capsys):
-        """Safety net warning count printed when warnings exist."""
+    def test_safety_net_legend_printed(self, capsys):
+        """Safety net legend printed when warnings exist."""
         raw = [
             _make_finding(Severity.HIGH, rule_id="r1"),
             _make_finding(Severity.HIGH, rule_id="r2"),
@@ -2058,7 +2005,8 @@ class TestSmartGateSummaryPrint:
         }
         self._gate(raw, analysis, mode="enforce")
         out = capsys.readouterr().out
-        assert "Safety net: 1 warning(s)" in out
+        assert "safety-net = 1 HIGH/CRITICAL" in out
+        assert "agent missed" in out
 
     def test_findings_table_printed(self, capsys):
         """Findings table printed with all raw findings and verdicts."""
@@ -2090,6 +2038,31 @@ class TestSmartGateSummaryPrint:
         assert "confirmed" in out
         assert "dismissed" in out
         assert "Summary:" in out
+
+    def test_noise_has_default_reason(self, capsys):
+        """Noise findings show 'not flagged by agent' as default reason."""
+        raw = [_make_finding(Severity.LOW, rule_id="noise.rule",
+                             path="x.py", line=1)]
+        self._gate(raw, _empty_analysis(), mode="shadow")
+        out = capsys.readouterr().out
+        assert "not flagged by agent" in out
+
+    def test_safety_net_has_default_reason(self, capsys):
+        """Safety-net findings show default reason in table."""
+        raw = [_make_finding(Severity.HIGH, rule_id="missed.rule",
+                             path="x.py", line=1)]
+        analysis = {
+            "confirmed": [],
+            "dismissed": [],
+            "findings_analyzed": 1,
+            "summary": "clean",
+            "rulesets_used": [],
+            "rulesets_rationale": "",
+            "risk_assessment": "",
+        }
+        self._gate(raw, analysis, mode="enforce")
+        out = capsys.readouterr().out
+        assert "HIGH/CRITICAL not confirmed" in out
 
     def test_shadow_reason_has_severity_breakdown(self, capsys):
         """Shadow mode reason includes severity breakdown."""

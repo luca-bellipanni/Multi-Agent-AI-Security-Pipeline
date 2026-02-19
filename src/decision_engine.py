@@ -285,7 +285,7 @@ class DecisionEngine:
                 configs = ", ".join(semgrep_tool._all_configs_used)
                 print(f"  Configs: {configs}")
             if diff_tool is not None and diff_tool._call_count > 0:
-                print(f"  Diff: {diff_tool._call_count} call(s)")
+                print(f"  PR diff: {diff_tool._call_count} call(s)")
             if semgrep_tool._all_scan_errors:
                 print(f"  Semgrep errors "
                       f"({len(semgrep_tool._all_scan_errors)}):")
@@ -456,10 +456,10 @@ class DecisionEngine:
         agent_reasons: dict[str, str] = {}
         for c in agent_analysis.get("confirmed", []):
             if isinstance(c, dict) and c.get("rule_id"):
-                agent_reasons[c["rule_id"]] = c.get("reason", "")[:40]
+                agent_reasons[c["rule_id"]] = c.get("reason", "")[:80]
         for d in agent_analysis.get("dismissed", []):
             if isinstance(d, dict) and d.get("rule_id"):
-                agent_reasons[d["rule_id"]] = d.get("reason", "")[:40]
+                agent_reasons[d["rule_id"]] = d.get("reason", "")[:80]
 
         # Deduplicate by rule_id+path+line for display
         seen: set[tuple[str, str, int]] = set()
@@ -487,6 +487,12 @@ class DecisionEngine:
             short_path = (f.path.rsplit("/", 1)[-1]
                           if "/" in f.path else f.path)
             reason = agent_reasons.get(f.rule_id, "")
+            # Default reasons for verdicts without explicit agent reason
+            if not reason:
+                if verdict == "noise":
+                    reason = "not flagged by agent"
+                elif verdict == "safety-net":
+                    reason = "HIGH/CRITICAL not confirmed"
 
             rows.append((
                 f.severity.value.upper(), short_rule,
@@ -791,8 +797,11 @@ class DecisionEngine:
             )
             safety_warnings.extend(sev_mismatches)
             if safety_warnings:
-                for w in safety_warnings:
-                    print(f"::warning::Safety net: {w['message']}")
+                print(
+                    f"::warning::Safety net triggered: "
+                    f"{len(safety_warnings)} HIGH/CRITICAL finding(s) "
+                    f"not confirmed by agent"
+                )
         else:
             # Fail-secure: no analysis → fallback to active findings
             effective_findings = list(active_findings)
@@ -846,19 +855,12 @@ class DecisionEngine:
             c["rule_id"] for c in agent_analysis.get("confirmed", [])
             if isinstance(c, dict) and isinstance(c.get("rule_id"), str)
         })
-        print(f"  Scanner: {raw_count} raw finding(s)")
-        if confirmed_rules:
-            if findings_count != confirmed_rules:
-                print(f"  Agent: {confirmed_rules} rule(s) confirmed "
-                      f"\u2192 {findings_count} raw match(es)")
-            else:
-                print(f"  Agent: {findings_count} finding(s) confirmed")
         if confirmed_rules > 0 and findings_count == 0:
-            print(f"  Warning: {confirmed_rules} agent finding(s) "
-                  f"not confirmed by scanner")
+            print(f"  Warning: agent confirmed {confirmed_rules} finding(s) "
+                  f"but none matched scanner results")
         if safety_warnings:
-            print(f"  Safety net: {len(safety_warnings)} warning(s) "
-                  f"(HIGH/CRITICAL missed by agent)")
+            print(f"  * safety-net = {len(safety_warnings)} HIGH/CRITICAL "
+                  f"finding(s) the agent missed — included as precaution")
         print(f"  Mode: {ctx.mode}")
 
         excepted_count = len(excepted_info)

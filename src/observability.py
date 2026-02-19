@@ -31,7 +31,7 @@ def _extract_step_description(step) -> str:
     """Extract a human-readable description from a smolagents step.
 
     Priority:
-    1. step.model_output → parse "Thought:" line, truncate to 80 chars
+    1. step.model_output → parse "Thought:" line, first sentence ≤120 chars
     2. Parse code in tool_calls arguments for known tool names
     3. Fallback: "(reasoning)"
     """
@@ -42,8 +42,19 @@ def _extract_step_description(step) -> str:
             stripped = line.strip()
             if stripped.lower().startswith("thought:"):
                 thought = stripped[len("thought:"):].strip()
-                if thought:
-                    return thought[:80]
+                if not thought or thought.endswith(":"):
+                    continue  # skip empty or intro-only thoughts
+                # Take first sentence (up to period)
+                dot_idx = thought.find(".")
+                if 0 < dot_idx < 120:
+                    return thought[:dot_idx + 1]
+                # No period — truncate at word boundary
+                if len(thought) > 120:
+                    cut = thought[:120].rfind(" ")
+                    if cut > 40:
+                        return thought[:cut] + "..."
+                    return thought[:120] + "..."
+                return thought
 
     # 2. Parse code for known tool function calls
     tool_calls = getattr(step, "tool_calls", None)
